@@ -126,7 +126,7 @@ namespace MHServerEmu.Games.Regions
         public Region EmptyRegion(RegionPrototypeId prototype)
         {
             Region region = new(prototype,
-             SeedNumberFromCommand != 0 ? SeedNumberFromCommand : 1038711701,
+             SeedNumberFromCommand != 0 ? SeedNumberFromCommand : Game.Random.Next(),
              Array.Empty<byte>(),
              new(),
              new(),
@@ -200,14 +200,14 @@ namespace MHServerEmu.Games.Regions
             {
                 // Generate the region and create entities for it if needed
                 ulong numEntities = _entityManager.PeekNextEntityId();
-              if (GenerationModeFromCommand == GenerationMode.Client)
-                  region = EmptyRegion(prototype);
-              else
+                if (GenerationModeFromCommand == GenerationMode.Client)
+                    region = EmptyRegion(prototype);
+                else
                 {
                     region = GenerateRegion(prototype);
                     region.ArchiveData = GetArchiveData(prototype);
                 }
-              
+
                 HardcodedEntities(region, true);
                 ulong entities = _entityManager.PeekNextEntityId() - numEntities;
                 Logger.Debug($"Entities generated = {entities}");

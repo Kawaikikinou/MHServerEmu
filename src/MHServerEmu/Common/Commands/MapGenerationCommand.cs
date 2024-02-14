@@ -15,6 +15,7 @@ namespace MHServerEmu.Common.Commands
     internal class MapGenerationCommand
     {
         TextWriter _originalOutput = null;
+        string seedGiven;
 
         string RegionName() => ((RegionPrototypeId)RegionManager.RegionPrototypeIdFromCommand).ToString();
 
@@ -50,7 +51,8 @@ namespace MHServerEmu.Common.Commands
 
             if (@params.Length == 2)
             {
-                if (!int.TryParse(@params[1], out RegionManager.SeedNumberFromCommand))
+                seedGiven = @params[1];
+                if (!int.TryParse(seedGiven, out RegionManager.SeedNumberFromCommand))
                     return CommandResult("Seed is not a seed");
             }
             else
@@ -65,6 +67,13 @@ namespace MHServerEmu.Common.Commands
                 RegionManager.RegionPrototypeIdFromCommand = regionPrototypeId;
 
                 ServerProcess();
+
+                if (!string.IsNullOrEmpty(seedGiven))
+                {
+                    if (!int.TryParse(seedGiven, out RegionManager.SeedNumberFromCommand))
+                        return CommandResult("Seed is not a seed");
+                }
+
                 ClientProcess();
 
                 Log($"Logs of region {RegionName()} done");
@@ -100,9 +109,6 @@ namespace MHServerEmu.Common.Commands
                         else
                             continue;
                     }
-
-                    if (beginFound && line.Contains("[Debug] [EntityManager] [Marker]"))
-                        break;
 
                     clearText.Add(line);
                 }
