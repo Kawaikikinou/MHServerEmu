@@ -72,6 +72,60 @@ namespace MHServerEmu.Games.GameData.Prototypes
         AvatarRing = 0
     }
 
+    [AssetEnum((int)Invalid)]
+    public enum EvalOp
+    {
+        Invalid = 0,
+        And = 1,
+        Equals = 2,
+        GreaterThan = 3,
+        IsContextDataNull = 4,
+        LessThan = 5,
+        DifficultyTierRange = 6,
+        MissionIsActive = 7,
+        MissionIsComplete = 8,
+        Not = 9,
+        Or = 10,
+        LoadAssetRef = 12,
+        LoadBool = 13,
+        LoadFloat = 14,
+        LoadInt = 15,
+        LoadProtoRef = 16,
+        For = 19,
+        ForEachProtoRefInContextRefList = 21,
+        IfElse = 22,
+        Scope = 23,
+        LoadCurve = 25,
+        Add = 26,
+        Div = 27,
+        Exponent = 28,
+        Max = 29,
+        Min = 30,
+        Modulus = 31,
+        Mult = 32,
+        Sub = 33,
+        AssignProp = 34,
+        AssignPropEvalParams = 35,
+        HasProp = 36,
+        LoadProp = 37,
+        LoadPropContextParams = 38,
+        LoadPropEvalParams = 39,
+        RandomFloat = 41,
+        RandomInt = 42,
+        LoadEntityToContextVar = 43,
+        LoadConditionCollectionToContext = 44,
+        EntityHasKeyword = 45,
+        EntityHasTalent = 46,
+        ExportError = 24,
+        HasEntityInInventory = 11,
+        IsInParty = 50,
+        GetCombatLevel = 47,
+        GetPowerRank = 48,
+        CalcPowerRank = 49,
+        GetDamageReductionPct = 51,
+        GetDistanceToEntity = 52,
+    };
+
     #endregion
 
     public class EvalPrototype : Prototype
