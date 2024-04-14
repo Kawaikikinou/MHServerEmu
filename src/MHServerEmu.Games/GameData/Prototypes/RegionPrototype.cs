@@ -1,6 +1,6 @@
 ﻿using MHServerEmu.Games.GameData.Calligraphy.Attributes;
-using MHServerEmu.Games.GameData.Calligraphy;
 using MHServerEmu.Games.Regions;
+using MHServerEmu.Games.Regions.ObjectiveGraphs;
 
 namespace MHServerEmu.Games.GameData.Prototypes
 {
@@ -51,14 +51,6 @@ namespace MHServerEmu.Games.GameData.Prototypes
         None = 0,
         PvPQueue = 1,
         DailyQueue = 5,
-    }
-
-    [AssetEnum((int)Off)]
-    public enum ObjectiveGraphModeAsset         // Regions/EnumObjectiveGraphMode.type
-    {
-        Off,
-        PathDistance,
-        PathNavi,
     }
 
     [AssetEnum((int)BiDirectional)]
@@ -149,6 +141,8 @@ namespace MHServerEmu.Games.GameData.Prototypes
         public PrototypeId[] LoadingScreensConsole { get; protected set; }
         public bool AllowLocalCoopMode { get; protected set; }
 
+        private KeywordsMask _keywordsMask;
+
         public static bool Equivalent(RegionPrototype regionA, RegionPrototype regionB)
         {
             if (regionA == null || regionB == null) return false;
@@ -193,8 +187,20 @@ namespace MHServerEmu.Games.GameData.Prototypes
             return difficultyGlobals.RegionSettingsDefault;
         }
 
+        public override void PostProcess()
+        {
+            base.PostProcess();
 
-}
+            _keywordsMask = KeywordPrototype.GetBitMaskForKeywordList(Keywords);
+
+            // TODO others
+        }
+
+        public bool HasKeyword(KeywordPrototype keywordProto)
+        {
+            return keywordProto != null && KeywordPrototype.TestKeywordBit(_keywordsMask, keywordProto);
+        }
+    }
 
     public class RegionConnectionTargetPrototype : Prototype
     {
@@ -210,7 +216,7 @@ namespace MHServerEmu.Games.GameData.Prototypes
 
     public class ObjectiveGraphSettingsPrototype : Prototype
     {
-        public ObjectiveGraphModeAsset Mode { get; protected set; }
+        public ObjectiveGraphMode Mode { get; protected set; }
     }
 
     public class FactionLimitPrototype : Prototype

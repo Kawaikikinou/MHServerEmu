@@ -13,7 +13,7 @@ namespace MHServerEmu.Games.UI
     /// <summary>
     /// Base class for serializable UI widget data.
     /// </summary>
-    public class UISyncData
+    public class UISyncData : ISerialize
     {
         private static readonly Logger Logger = LogManager.CreateLogger();
 
@@ -34,6 +34,36 @@ namespace MHServerEmu.Games.UI
             _uiDataProvider = uiDataProvider;
             _widgetRef = widgetRef;
             _contextRef = contextRef;
+        }
+
+        public virtual bool Serialize(Archive archive)
+        {
+            bool success = true;
+
+            int numAreas = _areaList.Count;
+            success &= Serializer.Transfer(archive, ref numAreas);
+
+            if (archive.IsPacking)
+            {
+                for (int i = 0; i < _areaList.Count; i++)
+                {
+                    PrototypeId areaRef = _areaList[i];
+                    success &= Serializer.Transfer(archive, ref areaRef);
+                }
+            }
+            else
+            {
+                _areaList.Clear();
+                
+                for (int i = 0; i < numAreas; i++)
+                {
+                    PrototypeId areaRef = PrototypeId.Invalid;
+                    success &= Serializer.Transfer(archive, ref areaRef);
+                    _areaList.Add(areaRef);
+                }
+            }
+
+            return success;
         }
 
         public virtual void Decode(CodedInputStream stream, BoolDecoder boolDecoder)
@@ -106,8 +136,8 @@ namespace MHServerEmu.Games.UI
             for (int i = 0; i < _areaList.Count; i++)
                 sb.AppendLine($"{nameof(_areaList)}[{i}]: {_areaList[i]}");
 
-            sb.AppendLine($"{nameof(_timeStart)}: {_timeStart}");
-            sb.AppendLine($"{nameof(_timeEnd)}: {_timeEnd}");
+            sb.AppendLine($"{nameof(_timeStart)}: {(_timeStart != 0 ? Clock.GameTimeMillisecondsToDateTime(_timeStart) : 0)}");
+            sb.AppendLine($"{nameof(_timeEnd)}: {(_timeEnd != 0 ? Clock.GameTimeMillisecondsToDateTime(_timeEnd) : 0)}");
             sb.AppendLine($"{nameof(_timePaused)}: {_timePaused}");
         }
     }

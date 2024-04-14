@@ -345,13 +345,15 @@ namespace MHServerEmu.Games.Generators.Population
 
             return null;
         }
-    }
 
-    public class SpawnSpec
-    {
-        public static bool? SnapToFloorConvert(bool overrideSnapToFloor, bool overrideSnapToFloorValue)
+        public int CalcFreeReservation(PrototypeId markerRef, PrototypeId spawnAreaRef)
         {
-            return overrideSnapToFloor ? overrideSnapToFloorValue : null;
+            int count = 0;
+            if (_areaLookup.TryGetValue(spawnAreaRef, out var spawnMap) && spawnMap != null)
+                if (spawnMap.TryGetValue(markerRef, out var list) == false && list != null) 
+                    foreach (var testReservation in list)
+                        if (testReservation.State == MarkerState.Free) count++;
+            return count;
         }
     }
 }

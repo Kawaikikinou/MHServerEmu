@@ -2,21 +2,20 @@
 using Google.ProtocolBuffers;
 using MHServerEmu.Core.Extensions;
 using MHServerEmu.Core.Logging;
-using MHServerEmu.Games.Entities;
-using MHServerEmu.Games.GameData;
-using MHServerEmu.Games.GameData.Prototypes;
-using MHServerEmu.Games.Generators.Population;
-using MHServerEmu.Games.Generators;
-using MHServerEmu.Games.Generators.Regions;
-using MHServerEmu.Games.Missions;
-using MHServerEmu.Frontend;
-using MHServerEmu.Core.Network;
 using MHServerEmu.Core.System;
 using MHServerEmu.Core.Collisions;
 using MHServerEmu.Core.VectorMath;
-using MHServerEmu.Games.Network;
+using MHServerEmu.Games.Entities;
+using MHServerEmu.Games.GameData;
+using MHServerEmu.Games.GameData.Prototypes;
+using MHServerEmu.Games.Generators;
+using MHServerEmu.Games.Generators.Population;
+using MHServerEmu.Games.Generators.Regions;
 using MHServerEmu.Games.MetaGames;
+using MHServerEmu.Games.Missions;
 using MHServerEmu.Games.Navi;
+using MHServerEmu.Games.Network;
+using MHServerEmu.Games.Regions.ObjectiveGraphs;
 
 namespace MHServerEmu.Games.Regions
 {
@@ -218,8 +217,10 @@ namespace MHServerEmu.Games.Regions
             if (regionProto.MetaGames.HasValue())
                 foreach (var metaGameRef in regionProto.MetaGames)
                 {
-                    MetaGame metagame = Game.EntityManager.CreateMetaGame(metaGameRef, Id);
-                    RegisterMetaGame(metagame);
+                    EntitySettings metaSettings = new();
+                    metaSettings.RegionId = Id;
+                    metaSettings.EntityRef = metaGameRef;
+                    MetaGame metagame = Game.EntityManager.CreateEntity(metaSettings) as MetaGame;                    
                 }
 
             if (settings.GenerateAreas)
@@ -354,6 +355,7 @@ namespace MHServerEmu.Games.Regions
                     PartitionCell(cellItr.Value, PartitionContext.Insert);
 
             SpawnMarkerRegistry.InitializeSpacialPartition(bound);
+            PopulationManager.InitializeSpacialPartition(bound);
 
             return true;
         }
@@ -525,7 +527,10 @@ namespace MHServerEmu.Games.Regions
         }
 
         public bool InsertEntityInSpatialPartition(WorldEntity entity) => EntitySpatialPartition.Insert(entity);
-        public bool UpdateEntityInSpatialPartition(WorldEntity entity) => EntitySpatialPartition.Update(entity);
+        public void UpdateEntityInSpatialPartition(WorldEntity entity) {
+            if (EntitySpatialPartition.Update(entity) == false)
+                Logger.Error($"Update EntitySpatialPartition fail {entity.WorldEntityPrototype}");
+        }
         public bool RemoveEntityFromSpatialPartition(WorldEntity entity) => EntitySpatialPartition.Remove(entity);
 
         public IEnumerable<WorldEntity> IterateEntitiesInRegion(EntityRegionSPContext context)
@@ -741,8 +746,8 @@ namespace MHServerEmu.Games.Regions
             {
                 if (playerConnection.EntityToTeleport != null) // TODO change teleport without reload Region
                 {
-                    Vector3 position = new(playerConnection.EntityToTeleport.Location.GetPosition());
-                    Orientation orientation = new(playerConnection.EntityToTeleport.Location.GetOrientation());
+                    Vector3 position = new(playerConnection.EntityToTeleport.RegionLocation.GetPosition());
+                    Orientation orientation = new(playerConnection.EntityToTeleport.RegionLocation.GetOrientation());
                     if (playerConnection.EntityToTeleport.EntityPrototype is TransitionPrototype teleportEntity
                         && teleportEntity.SpawnOffset > 0) teleportEntity.CalcSpawnOffset(orientation, position);
                     playerConnection.StartPositon = position;
@@ -825,6 +830,17 @@ namespace MHServerEmu.Games.Regions
             }
 
             return false;
+        }
+
+        public int GetAreaLevel(Area area)
+        {
+            if (RegionPrototype.LevelUseAreaOffset) return area.GetAreaLevel();
+            return RegionLevel;
+        }
+
+        public bool HasKeyword(KeywordPrototype keywordProto)
+        {            
+            return keywordProto != null && RegionPrototype.HasKeyword(keywordProto);
         }
 
     }

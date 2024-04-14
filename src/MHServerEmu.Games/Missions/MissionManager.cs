@@ -11,14 +11,13 @@ using MHServerEmu.Games.GameData.Prototypes;
 
 namespace MHServerEmu.Games.Missions
 {
-    public class MissionManager
+    public class MissionManager : ISerialize
     {
         private static readonly Logger Logger = LogManager.CreateLogger();
 
-        public PrototypeId PrototypeId { get; set; }
-        public Dictionary<PrototypeId, Mission> Missions { get; set; } = new();
-        public SortedDictionary<PrototypeGuid, LegendaryMissionBlacklist> LegendaryMissionBlacklists { get; set; } = new();
-
+        private PrototypeId _avatarPrototypeRef;
+        private Dictionary<PrototypeId, Mission> _missionDict = new();
+        private SortedDictionary<PrototypeGuid, List<PrototypeGuid>> _legendaryMissionBlacklist = new();
 
         public Player Player { get; private set; }       
         public Game Game { get; private set; }
@@ -29,67 +28,92 @@ namespace MHServerEmu.Games.Missions
 
         public MissionManager() { }
 
-        public MissionManager(CodedInputStream stream, BoolDecoder boolDecoder)
+        public bool Serialize(Archive archive)
         {
-            PrototypeId = stream.ReadPrototypeRef<Prototype>();
+            bool success = true;
+            success &= Serializer.Transfer(archive, ref _avatarPrototypeRef);
+            success &= SerializeMissions(archive);
+            return success;
+        }
 
-            Missions.Clear();
-            int mlength = (int)stream.ReadRawVarint64();
+        public void Decode(CodedInputStream stream, BoolDecoder boolDecoder)
+        {
+            _avatarPrototypeRef = stream.ReadPrototypeRef<Prototype>();
 
-            for (int i = 0; i < mlength; i++)
+            // MissionManager::SerializeMissions()
+            _missionDict.Clear();
+            ulong numMissions = stream.ReadRawVarint64();
+            for (ulong i = 0; i < numMissions; i++)
             {
                 PrototypeGuid missionGuid = (PrototypeGuid)stream.ReadRawVarint64();
-                var missionRef = GameDatabase.GetDataRefByPrototypeGuid(missionGuid);
-                // Mission mission = CreateMission(missionRef);
-                // mission.Decode(stream, boolDecoder) TODO
-                Mission mission = new(stream, boolDecoder);
+                PrototypeId missionRef = GameDatabase.GetDataRefByPrototypeGuid(missionGuid);
+                Mission mission = CreateMission(missionRef);
+                mission.Decode(stream, boolDecoder);
                 InsertMission(mission);
             }
 
-            LegendaryMissionBlacklists.Clear();
-            mlength = stream.ReadRawInt32();
-
-            for (int i = 0; i < mlength; i++)
-            {                
+            _legendaryMissionBlacklist.Clear();
+            int numCategories = stream.ReadRawInt32();
+            for (int i = 0; i < numCategories; i++)
+            {
                 PrototypeGuid category = (PrototypeGuid)stream.ReadRawVarint64();
-                LegendaryMissionBlacklist legendaryMission = new(stream);
-                LegendaryMissionBlacklists.Add(category, legendaryMission);
+
+                List<PrototypeGuid> categoryMissionList = new();
+                ulong numBlacklistCategoryMissions = stream.ReadRawVarint64();
+                for (ulong j = 0; j < numBlacklistCategoryMissions; j++)
+                    categoryMissionList.Add((PrototypeGuid)stream.ReadRawVarint64());
+
+                _legendaryMissionBlacklist.Add(category, categoryMissionList);
             }
         }
 
         public void EncodeBools(BoolEncoder boolEncoder)
         {
-            foreach (var mission in Missions)
-                boolEncoder.EncodeBool(mission.Value.Suspended);
+            foreach (var mission in _missionDict)
+                boolEncoder.EncodeBool(mission.Value.IsSuspended);
         }
 
         public void Encode(CodedOutputStream stream, BoolEncoder boolEncoder)
         {
-            stream.WritePrototypeRef<Prototype>(PrototypeId);
+            stream.WritePrototypeRef<Prototype>(_avatarPrototypeRef);
 
-            stream.WriteRawVarint64((ulong)Missions.Count);
-            foreach (var pair in Missions)
+            // MissionManager::SerializeMissions()
+            stream.WriteRawVarint64((ulong)_missionDict.Count);
+            foreach (var kvp in _missionDict)
             {
-                PrototypeGuid missionGuid = GameDatabase.GetPrototypeGuid(pair.Key);
-                stream.WriteRawVarint64((ulong)missionGuid);
-                pair.Value.Encode(stream, boolEncoder);
+                PrototypeGuid missionGuid = GameDatabase.GetPrototypeGuid(kvp.Key);
+                stream.WriteRawVarint64((ulong)missionGuid);    // missionGuid
+                kvp.Value.Encode(stream, boolEncoder);
             }
 
-            stream.WriteRawInt32(LegendaryMissionBlacklists.Count);
-            foreach (var pair in LegendaryMissionBlacklists)
+            stream.WriteRawInt32(_legendaryMissionBlacklist.Count);
+            foreach (var kvp in _legendaryMissionBlacklist)
             {
-                PrototypeGuid category = pair.Key;
-                stream.WriteRawVarint64((ulong)category); 
-                pair.Value.Encode(stream);
+                stream.WriteRawVarint64((ulong)kvp.Key);        // category
+
+                List<PrototypeGuid> categoryMissionList = kvp.Value;
+                stream.WriteRawVarint64((ulong)categoryMissionList.Count);
+                foreach (PrototypeGuid guid in categoryMissionList)
+                    stream.WriteRawVarint64((ulong)guid);
             }
         }
 
         public override string ToString()
         {
             StringBuilder sb = new();
-            sb.AppendLine($"PrototypeId: {GameDatabase.GetPrototypeName(PrototypeId)}");
-            foreach (var pair in Missions) sb.AppendLine($"Mission[{pair.Key}]: {pair.Value}");
-            foreach (var pair in LegendaryMissionBlacklists) sb.AppendLine($"LegendaryMissionBlacklist[{pair.Key}]: {pair.Value}");
+            sb.AppendLine($"{nameof(_avatarPrototypeRef)}: {GameDatabase.GetPrototypeName(_avatarPrototypeRef)}");
+
+            foreach (var kvp in _missionDict)
+                sb.AppendLine($"{nameof(_missionDict)}[{kvp.Key}]: {kvp.Value}");
+
+            foreach (var kvp in _legendaryMissionBlacklist)
+            {
+                string categoryName = Path.GetFileNameWithoutExtension(GameDatabase.GetPrototypeNameByGuid(kvp.Key));
+                sb.AppendLine($"{nameof(_legendaryMissionBlacklist)}[{categoryName}]:");
+                foreach (PrototypeGuid guid in kvp.Value)
+                    sb.AppendLine(GameDatabase.GetPrototypeNameByGuid(guid));
+            }
+
             return sb.ToString();
         }
 
@@ -106,6 +130,13 @@ namespace MHServerEmu.Games.Missions
             Player = player;
             SetRegion(region);
 
+            return true;
+        }
+
+        public bool SetAvatar(PrototypeId avatarPrototypeRef)
+        {
+            // TODO: Pass the avatar instance itself rather than its prototype and do all the necessary initialization
+            _avatarPrototypeRef = avatarPrototypeRef;
             return true;
         }
 
@@ -148,7 +179,7 @@ namespace MHServerEmu.Games.Missions
         public Mission InsertMission(Mission mission)
         {
             if (mission == null) return null;
-            Missions.Add(mission.PrototypeId, mission); 
+            _missionDict.Add(mission.PrototypeDataRef, mission); 
             return mission;
         }
 
@@ -167,7 +198,7 @@ namespace MHServerEmu.Games.Missions
                 if (missionProto == null) continue;
                 if (missionProto.HasPopulationInRegion(region) == false) continue;
                 if (IsMissionValidAndApprovedForUse(missionProto))
-                    region.PopulationManager.MissionRegisty(missionProto);
+                    region.PopulationManager.MissionRegistry(missionProto);
             }
             return true;
         }
@@ -192,6 +223,68 @@ namespace MHServerEmu.Games.Missions
             }
 
             return IsMissionValidAndApprovedForUse(missionPrototype);
+        }
+
+        private bool SerializeMissions(Archive archive)
+        {
+            bool success = true;
+
+            ulong numMissions = (ulong)_missionDict.Count;
+            success &= Serializer.Transfer(archive, ref numMissions);
+
+            if (archive.IsPacking)
+            {
+                foreach (var kvp in _missionDict)
+                {
+                    ulong guid = (ulong)GameDatabase.GetPrototypeGuid(kvp.Key);
+                    success &= Serializer.Transfer(archive, ref guid);
+
+                    ISerialize mission = kvp.Value;
+                    success &= Serializer.Transfer(archive, ref mission);
+                }
+
+                int numBlacklistCategories = _legendaryMissionBlacklist.Count;
+                success &= Serializer.Transfer(archive, ref numBlacklistCategories);
+                foreach (var kvp in _legendaryMissionBlacklist)
+                {
+                    ulong categoryGuid = (ulong)kvp.Key;
+                    success &= Serializer.Transfer(archive, ref categoryGuid);
+
+                    List<PrototypeGuid> categoryMissionList = kvp.Value;
+                    success &= Serializer.Transfer(archive, ref categoryMissionList);
+                }
+            }
+            else
+            {
+                for (ulong i = 0; i < numMissions; i++)
+                {
+                    ulong guid = 0;
+                    success &= Serializer.Transfer(archive, ref guid);
+
+                    PrototypeId missionRef = GameDatabase.GetDataRefByPrototypeGuid((PrototypeGuid)guid);
+                    Mission mission = CreateMission(missionRef);
+                    success &= mission.Serialize(archive);
+                    InsertMission(mission);
+                }
+
+                int numBlacklistCategories = 0;
+                success &= Serializer.Transfer(archive, ref numBlacklistCategories);
+                if (numBlacklistCategories == 0) return success;
+
+                _legendaryMissionBlacklist.Clear();
+                for (int i = 0; i < numBlacklistCategories; i++)
+                {
+                    ulong categoryGuid = 0;
+                    success &= Serializer.Transfer(archive, ref categoryGuid);
+
+                    List<PrototypeGuid> categoryMissionList = new();
+                    success &= Serializer.Transfer(archive, ref categoryMissionList);
+
+                    _legendaryMissionBlacklist.Add((PrototypeGuid)categoryGuid, categoryMissionList);
+                }
+            }
+
+            return success;
         }
 
         /// <summary>
@@ -222,6 +315,49 @@ namespace MHServerEmu.Games.Missions
             return true;
         }
 
+        public static Mission FindMissionForPlayer(Player player, PrototypeId missionRef)
+        {
+            MissionManager missionManager = FindMissionManagerForMission(player, player.GetRegion(), missionRef);
+            if (missionManager == null)
+            {
+                Console.WriteLine($"Couldn't find appropriate mission manager on player {player} for mission [{GameDatabase.GetPrototypeName(missionRef)}].");
+                return null;
+            }
+            return missionManager.FindMissionByDataRef(missionRef);
+        }
+
+        private static MissionManager FindMissionManagerForMission(Player player, Region region, PrototypeId missionRef)
+        {
+            return FindMissionManagerForMission(player, region, missionRef.As<MissionPrototype>());
+        }
+
+        private static MissionManager FindMissionManagerForMission(Player player, Region region, MissionPrototype missionProto)
+        {
+            if (player != null)
+            {
+                MissionManager playerMissionManager = player.MissionManager;
+                if (playerMissionManager != null && playerMissionManager.ShouldCreateMission(missionProto))
+                    return playerMissionManager;
+            }
+
+            if (region != null)
+            {
+                MissionManager regionMissionManager = region.MissionManager;
+                if (regionMissionManager != null && regionMissionManager.ShouldCreateMission(missionProto))
+                    return regionMissionManager;
+            }
+
+            return null;
+        }
+
+        private Mission FindMissionByDataRef(PrototypeId missionRef)
+        {
+            if (_missionDict.TryGetValue(missionRef, out var mission))
+                return mission;
+            else
+                return null;
+        }
+
         public static readonly MissionPrototypeId[] DisabledMissions = new MissionPrototypeId[]
         {
             MissionPrototypeId.CH00TrainingPathingController,
@@ -248,18 +384,12 @@ namespace MHServerEmu.Games.Missions
         // TODO replace this mission to MetaStates
         public static readonly MissionPrototypeId[] EventMissions = new MissionPrototypeId[]
         {
+            /*
             MissionPrototypeId.MoloidAttackAftermath,
             MissionPrototypeId.Moloid3AgainstLeaper,
             MissionPrototypeId.MoloidRescueCivilian,
             MissionPrototypeId.MoloidAmbushBreakIn,
-/*
-            MissionPrototypeId.MutantsRunningGroup1,
-            MissionPrototypeId.MutantsRunningGroup2,
-            MissionPrototypeId.MutantRunningSoloF5,
-
-*/          
-            MissionPrototypeId.SunTribeKingLizard,
-            MissionPrototypeId.SunTribeLeadingRaptors,
+            */
 
             MissionPrototypeId.NorwayFrostGolemsFaeAmbushV1,
             MissionPrototypeId.NorwayFrostGolemsFaeAmbushV2,
