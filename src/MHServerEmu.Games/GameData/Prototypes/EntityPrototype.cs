@@ -1,4 +1,5 @@
-﻿using MHServerEmu.Core.Collections;
+﻿using Gazillion;
+using MHServerEmu.Core.Collections;
 using MHServerEmu.Core.Extensions;
 using MHServerEmu.Core.System.Random;
 using MHServerEmu.Core.VectorMath;
@@ -6,7 +7,9 @@ using MHServerEmu.Games.Dialog;
 using MHServerEmu.Games.GameData.Calligraphy;
 using MHServerEmu.Games.GameData.Calligraphy.Attributes;
 using MHServerEmu.Games.GameData.LiveTuning;
+using MHServerEmu.Games.GameData.Prototypes.Markers;
 using MHServerEmu.Games.Network;
+using MHServerEmu.Games.Properties;
 using MHServerEmu.Games.Regions;
 
 namespace MHServerEmu.Games.GameData.Prototypes
@@ -280,6 +283,9 @@ namespace MHServerEmu.Games.GameData.Prototypes
         public DesignWorkflowState DesignStateXboxOne { get; protected set; }
 
         [DoNotCopy]
+        public bool IsCurrency { get => Properties != null && Properties.HasProperty(PropertyEnum.ItemCurrency); }
+
+        [DoNotCopy]
         public AlliancePrototype AlliancePrototype { get => Alliance.As<AlliancePrototype>(); }
         [DoNotCopy]
         public RankPrototype RankPrototype { get => Rank.As<RankPrototype>(); }
@@ -296,6 +302,9 @@ namespace MHServerEmu.Games.GameData.Prototypes
 
         [DoNotCopy]
         public int WorldEntityPrototypeEnumValue { get; private set; }
+
+        [DoNotCopy]
+        public bool DiscoverInRegion { get => ObjectiveInfo?.EdgeEnabled == true || HACKDiscoverInRegion; }
 
         public override void PostProcess()
         {
@@ -315,6 +324,19 @@ namespace MHServerEmu.Games.GameData.Prototypes
         {
             // Add settings for using DesignStatePS4 or DesignStateXboxOne here if we end up supporting console clients
             return GameDatabase.DesignStateOk(DesignState);
+        }
+
+        public virtual bool IsLiveTuningEnabled()
+        {
+            int tuningVar = (int)Math.Floor(LiveTuningManager.GetLiveWorldEntityTuningVar(this, WorldEntityTuningVar.eWETV_Enabled));
+
+            if (tuningVar == 0)
+                return false;
+
+            if (tuningVar == 1)
+                return LiveTuningDefaultEnabled;
+
+            return true;
         }
 
         public bool HasKeyword(KeywordPrototype keywordProto)
@@ -576,11 +598,19 @@ namespace MHServerEmu.Games.GameData.Prototypes
         public PrototypeId ShowConfirmationDialogTemplate { get; protected set; }
         public PrototypeId ShowConfirmationDialogEnemy { get; protected set; }
 
-        public void CalcSpawnOffset(ref Orientation targetRot, ref Vector3 targetPos)
+        public Vector3 CalcSpawnOffset(in Orientation rotation)
         {
-            float offset = SpawnOffset;
-            targetPos.X += offset * MathF.Cos(targetRot.Yaw);
-            targetPos.Y += offset * MathF.Sin(targetRot.Yaw);
+            return new(SpawnOffset * MathF.Cos(rotation.Yaw),
+                       SpawnOffset * MathF.Sin(rotation.Yaw),
+                       0f);
+        }
+
+        public static Vector3 CalcSpawnOffset(EntityMarkerPrototype entityMarkerProto)
+        {
+            var transitionProto = entityMarkerProto?.GetMarkedPrototype<TransitionPrototype>();
+            if (transitionProto == null) return Vector3.Zero;
+
+            return transitionProto.CalcSpawnOffset(entityMarkerProto.Rotation);
         }
     }
 

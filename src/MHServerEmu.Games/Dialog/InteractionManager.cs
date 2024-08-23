@@ -532,7 +532,8 @@ namespace MHServerEmu.Games.Dialog
             var worldEntityProto = entity.WorldEntityPrototype;
 
             if (entity is Transition transition)
-                foreach (var destination in transition.DestinationList)
+            {
+                foreach (Destination destination in transition.Destinations)
                 {
                     var regionRef = destination.RegionRef;
                     if (regionRef != PrototypeId.Invalid)
@@ -549,6 +550,7 @@ namespace MHServerEmu.Games.Dialog
                         }
                     }
                 }
+            }
 
             if (entity is KismetSequenceEntity)
             {
@@ -1235,6 +1237,13 @@ namespace MHServerEmu.Games.Dialog
         public EntityAppearanceEnum? AppearanceEnum;
         public HashSet<EntityObjectiveInfo> MissionObjectives { get; set; } // client only
         public DialogDataCollection DialogDataCollection { get; set; } // client only
+
+        public InteractData()
+        {
+            Visible = true;
+            Interactable = TriBool.Undefined;
+            VisibleOverride = TriBool.Undefined;
+        }
     }
 
     public class InteractionData

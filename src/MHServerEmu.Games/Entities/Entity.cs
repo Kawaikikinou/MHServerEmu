@@ -93,7 +93,7 @@ namespace MHServerEmu.Games.Entities
 
     #endregion
 
-    public class Entity : ISerialize, IPropertyChangeWatcher
+    public class Entity : IArchiveMessageDispatcher, ISerialize, IPropertyChangeWatcher
     {
         public const ulong InvalidId = 0;
 
@@ -116,7 +116,7 @@ namespace MHServerEmu.Games.Entities
         public bool IsInGame { get => TestStatus(EntityStatus.InGame); }
         public bool IsDestroyed { get => TestStatus(EntityStatus.Destroyed); }
 
-        public ReplicatedPropertyCollection Properties { get; set; }
+        public ReplicatedPropertyCollection Properties { get; } = new();
 
         public Party Party { get; internal set; }
         public virtual ulong PartyId { get { var ownerPlayer = GetOwnerOfType<Player>(); return ownerPlayer != null ? ownerPlayer.PartyId : 0; } }
@@ -127,6 +127,7 @@ namespace MHServerEmu.Games.Entities
 
         public virtual AOINetworkPolicyValues CompatibleReplicationChannels { get => Prototype.RepNetwork; }
         public InterestReferences InterestReferences { get; } = new();
+        public bool CanSendArchiveMessages { get => IsInGame; }
 
         public InventoryCollection InventoryCollection { get; } = new();
         public InventoryLocation InventoryLocation { get; private set; } = new();
@@ -134,8 +135,6 @@ namespace MHServerEmu.Games.Entities
         public bool IsRootOwner { get => OwnerId == 0; }
         public virtual bool IsWakingUp { get => false; }
         public TimeSpan TotalLifespan { get; private set; }
-
-        public ulong RegionId { get; set; } = 0;    // REMOVEME: non-world entities should not have a region
 
         #region Flag Properties
 
@@ -231,12 +230,10 @@ namespace MHServerEmu.Games.Entities
             Prototype = PrototypeDataRef.As<EntityPrototype>();
             if (Prototype == null) return Logger.WarnReturn(false, "Initialize(): Prototype == null");
 
-            // Set region - REMOVEME: non-world entities should not have a region
-            RegionId = settings.RegionId;
+            // Bind fields that use the legacy replication system (RepVar / ReplicatedPropertyCollection)
+            BindReplicatedFields();
 
             // Initialize property collection and copy baseline properties from prototype / settings
-            // TODO: Bind to ArchiveMessageDispatcher
-            Properties = new(this, Game.CurrentRepId);
 
             // We use IPropertyChangeWatcher implementation as a replacement for multiple inheritance
             Attach(Properties);
@@ -285,6 +282,16 @@ namespace MHServerEmu.Games.Entities
             // Temp method for hacks that replace entity prototype after creation - use with caution and remove this later
             Prototype = prototypeRef.As<EntityPrototype>();
             PrototypeDataRef = prototypeRef;
+        }
+
+        protected virtual void BindReplicatedFields()
+        {
+            Properties.Bind(this, AOINetworkPolicyValues.AllChannels);
+        }
+
+        protected virtual void UnbindReplicatedFields()
+        {
+            Properties.Unbind();
         }
 
         protected virtual void BuildString(StringBuilder sb)
@@ -387,13 +394,13 @@ namespace MHServerEmu.Games.Entities
 
         #region AOI
 
-        public void UpdateInterestPolicies(bool updateForAllPlayers, EntitySettings settings = null)
+        public virtual void UpdateInterestPolicies(bool updateForAllPlayers, EntitySettings settings = null)
         {
             if (updateForAllPlayers)
             {
                 // Update interest policies for all players in the game (slow).
                 foreach (Player player in new PlayerIterator(Game))
-                    player.PlayerConnection.AOI.ConsiderEntity(this, settings);
+                    player.AOI.ConsiderEntity(this, settings);
             }
             else
             {
@@ -402,9 +409,14 @@ namespace MHServerEmu.Games.Entities
                 foreach (ulong playerId in InterestReferences.PlayerIds)
                 {
                     Player player = Game.EntityManager.GetEntity<Player>(playerId);
-                    player?.PlayerConnection.AOI.ConsiderEntity(this, settings);
+                    player?.AOI.ConsiderEntity(this, settings);
                 }
             }
+        }
+
+        public IEnumerable<PlayerConnection> GetInterestedClients(AOINetworkPolicyValues interestPolicies)
+        {
+            return Game.NetworkManager.GetInterestedClients(this, interestPolicies);
         }
 
         #endregion
@@ -434,6 +446,7 @@ namespace MHServerEmu.Games.Entities
         public virtual void OnDeallocate()
         {
             Game.GameEventScheduler.CancelAllEvents(_pendingEvents);
+            UnbindReplicatedFields();
         }
 
         public virtual void OnChangePlayerAOI(Player player, InterestTrackOperation operation,
@@ -485,29 +498,148 @@ namespace MHServerEmu.Games.Entities
 
             switch (id.Enum)
             {
+                case PropertyEnum.AIControlPowerLock:
+                    SetFlag(EntityFlags.AIControlPowerLock, newValue);
+                    break;
+
+                case PropertyEnum.AIMasterAvatarDbGuid:
+                    Properties[PropertyEnum.AIMasterAvatar] = newValue != 0;
+                    break;
+
                 case PropertyEnum.AIMasterAvatar:
                     SetFlag(EntityFlags.AIMasterAvatar, newValue);
                     break;
 
+                case PropertyEnum.AITargetableOverride:
+                    SetFlag(EntityFlags.AITargetableOverride, newValue);
+                    break;
+
                 case PropertyEnum.ClusterPrototype:
-                    SetFlag(EntityFlags.ClusterPrototype, newValue);
+                    SetFlag(EntityFlags.ClusterPrototype, newValue != PrototypeId.Invalid);
                     break;
 
                 case PropertyEnum.EncounterResource:
-                    SetFlag(EntityFlags.EncounterResource, newValue);
+                    SetFlag(EntityFlags.EncounterResource, newValue != PrototypeId.Invalid);
+                    break;
+
+                case PropertyEnum.IgnoreMissionOwnerForTargeting:
+                    SetFlag(EntityFlags.IgnoreMissionOwnerForTargeting, newValue);
+                    break;
+
+                case PropertyEnum.Immobilized:
+                    if (id.GetParam(0) > 0)
+                        SetFlag(EntityFlags.ImmobilizedParam, newValue);
+                    else
+                        SetFlag(EntityFlags.Immobilized, newValue);
+                    OnMovementPreventionPropertyChange(newValue);
+                    break;
+
+                case PropertyEnum.ImmobilizedByHitReact:
+                    SetFlag(EntityFlags.ImmobilizedByHitReact, newValue);
+                    OnMovementPreventionPropertyChange(newValue);
                     break;
 
                 case PropertyEnum.IsDead:
                     SetFlag(EntityFlags.IsDead, newValue);
                     break;
 
+                case PropertyEnum.Knockback:
+                    SetFlag(EntityFlags.Knockback, newValue);
+                    OnMovementPreventionPropertyChange(newValue);
+                    break;
+
+                case PropertyEnum.Knockdown:
+                    SetFlag(EntityFlags.Knockdown, newValue);
+                    OnMovementPreventionPropertyChange(newValue);
+                    break;
+
+                case PropertyEnum.Knockup:
+                    SetFlag(EntityFlags.Knockup, newValue);
+                    OnMovementPreventionPropertyChange(newValue);
+                    break;
+
+                case PropertyEnum.Mesmerized:
+                    SetFlag(EntityFlags.Mesmerized, newValue);
+                    OnMovementPreventionPropertyChange(newValue);
+                    break;
+
+                case PropertyEnum.MissionAllyOfAvatarDbGuid:
+                    Properties[PropertyEnum.MissionAllyOfAvatar] = newValue != 0;
+                    break;
+
                 case PropertyEnum.MissionPrototype:
-                    SetFlag(EntityFlags.HasMissionPrototype, newValue);
+                    SetFlag(EntityFlags.HasMissionPrototype, newValue != PrototypeId.Invalid);
+                    break;
+
+                case PropertyEnum.MissionXEncounterHostilityOk:
+                    SetFlag(EntityFlags.MissionXEncounterHostilityOk, newValue);
+                    break;
+
+                case PropertyEnum.NPCAmbientLock:
+                    SetFlag(EntityFlags.NPCAmbientLock, newValue);
+                    OnMovementPreventionPropertyChange(newValue);
+                    break;
+
+                case PropertyEnum.PowerLock:
+                    SetFlag(EntityFlags.PowerLock, newValue);
                     break;
 
                 case PropertyEnum.PowerUserOverrideID:
-                    SetFlag(EntityFlags.PowerUserOverrideId, newValue);
+                    SetFlag(EntityFlags.PowerUserOverrideId, newValue != InvalidId);
                     break;
+
+                case PropertyEnum.Stunned:
+                    SetFlag(EntityFlags.Stunned, newValue);
+                    OnMovementPreventionPropertyChange(newValue);
+                    break;
+
+                case PropertyEnum.StunnedByHitReact:
+                    SetFlag(EntityFlags.StunnedByHitReact, newValue);
+                    OnMovementPreventionPropertyChange(newValue);
+                    break;
+
+                case PropertyEnum.SystemImmobilized:
+                    SetFlag(EntityFlags.SystemImmobilized, newValue);
+                    break;
+
+                case PropertyEnum.TutorialImmobilized:
+                    SetFlag(EntityFlags.TutorialImmobilized, newValue);
+                    break;
+
+                case PropertyEnum.TutorialInvulnerable:
+                    SetFlag(EntityFlags.TutorialInvulnerable, newValue);
+                    break;
+
+                case PropertyEnum.TutorialPowerLock:
+                    SetFlag(EntityFlags.TutorialPowerLock, newValue);
+                    break;
+
+                case PropertyEnum.Untargetable:
+                    SetFlag(EntityFlags.Untargetable, newValue);
+                    break;
+
+                case PropertyEnum.Unaffectable:
+                    SetFlag(EntityFlags.Unaffectable, newValue);
+                    break;
+            }
+        }
+
+        private void OnMovementPreventionPropertyChange(bool newValue)
+        {
+            bool prevStatus = _flags.HasFlag(EntityFlags.HasMovementPreventionStatus);
+            if (prevStatus != newValue)
+            {
+                bool newStatus = newValue 
+                    || IsStunned 
+                    || IsMesmerized
+                    || IsInKnockback
+                    || IsInKnockdown
+                    || IsInKnockup
+                    || IsImmobilized
+                    || IsImmobilizedByHitReact
+                    || NPCAmbientLock;
+                if (newStatus != prevStatus)
+                    SetFlag(EntityFlags.HasMovementPreventionStatus, newStatus);
             }
         }
 

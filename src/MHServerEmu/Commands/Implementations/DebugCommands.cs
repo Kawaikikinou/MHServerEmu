@@ -1,5 +1,4 @@
-﻿using System.Text;
-using MHServerEmu.Commands.Attributes;
+﻿using MHServerEmu.Commands.Attributes;
 using MHServerEmu.Core.Collisions;
 using MHServerEmu.Core.Helpers;
 using MHServerEmu.Core.Logging;
@@ -43,8 +42,9 @@ namespace MHServerEmu.Commands.Implementations
             if (client == null) return "You can only invoke this command from the game.";
 
             CommandHelper.TryGetPlayerConnection(client, out PlayerConnection playerConnection);
+            Avatar avatar = playerConnection.Player.CurrentAvatar;
 
-            return $"Current cell: {playerConnection.AOI.Region.GetCellAtPosition(playerConnection.LastPosition).PrototypeName}";
+            return $"Current cell: {playerConnection.AOI.Region.GetCellAtPosition(avatar.RegionLocation.Position).PrototypeName}";
         }
 
         [Command("seed", "Shows current seed.", AccountUserLevel.User)]
@@ -63,8 +63,9 @@ namespace MHServerEmu.Commands.Implementations
             if (client == null) return "You can only invoke this command from the game.";
 
             CommandHelper.TryGetPlayerConnection(client, out PlayerConnection playerConnection);
+            Avatar avatar = playerConnection.Player.CurrentAvatar;
 
-            return $"Current area: {playerConnection.AOI.Region.GetCellAtPosition(playerConnection.LastPosition).Area.PrototypeName}";
+            return $"Current area: {playerConnection.AOI.Region.GetCellAtPosition(avatar.RegionLocation.Position).Area.PrototypeName}";
         }
 
         [Command("region", "Shows current region.", AccountUserLevel.User)]
@@ -128,11 +129,12 @@ namespace MHServerEmu.Commands.Implementations
             if (client == null) return "You can only invoke this command from the game.";
 
             CommandHelper.TryGetPlayerConnection(client, out PlayerConnection playerConnection);
+            Avatar avatar = playerConnection.Player.CurrentAvatar;
 
             if ((@params.Length > 0 && int.TryParse(@params[0], out int radius)) == false)
                 radius = 100;   // Default to 100 if no radius is specified
 
-            Sphere near = new(playerConnection.LastPosition, radius);
+            Sphere near = new(avatar.RegionLocation.Position, radius);
 
             List<string> entities = new();
             foreach (var worldEntity in playerConnection.AOI.Region.IterateEntitiesInVolume(near, new()))
@@ -205,23 +207,18 @@ namespace MHServerEmu.Commands.Implementations
             return string.Empty;
         }
 
-        [Command("powers", "Prints all powers assigned to the current avatar.", AccountUserLevel.User)]
-        public string Powers(string[] @params, FrontendClient client)
+        [Command("crashgame", "Crashes the current game instance.", AccountUserLevel.Admin)]
+        public string CrashGame(string[] @params, FrontendClient client)
         {
             if (client == null) return "You can only invoke this command from the game.";
-            CommandHelper.TryGetPlayerConnection(client, out PlayerConnection playerConnection);
-            Avatar avatar = playerConnection.Player.CurrentAvatar;
+            throw new("Game instance crash invoked by a debug command.");
+        }
 
-            StringBuilder sb = new();
-            foreach (var kvp in avatar.PowerCollection)
-                sb.AppendLine(kvp.Value.PowerPrototype.ToString());
-
-            if (sb.Length == 0) return $"No powers are assigned to {avatar}.";
-            
-            ChatHelper.SendMetagameMessage(client, $"Powers assigned to {avatar}:");
-            ChatHelper.SendMetagameMessageSplit(client, sb.ToString(), false);
-
-            return string.Empty;
+        [Command("crashserver", "Crashes the current game instance.", AccountUserLevel.Admin)]
+        public string CrashServer(string[] @params, FrontendClient client)
+        {
+            if (client != null) return "You can only invoke this command from the server console.";
+            throw new("Server crash invoked by a debug command.");
         }
 
         [Command("scheduletestevent", "Schedules a test event.", AccountUserLevel.Admin)]

@@ -287,6 +287,16 @@ namespace MHServerEmu.Games.GameData.Prototypes
         public PrototypeId DynamicBehavior { get; protected set; }
         public bool OrientToEnticerOrientation { get; protected set; }
 
+        public override void Init(Agent agent)
+        {
+            base.Init(agent);
+
+            AIController ownerController = agent.AIController;
+            if (ownerController == null) return;
+            BehaviorBlackboard blackboard = ownerController.Blackboard;
+            blackboard.PropertyCollection[PropertyEnum.AIInteractEntityId] = blackboard.PropertyCollection[PropertyEnum.AIEnticedToID];
+        }
+
         public override void Think(AIController ownerController)
         {
             ProceduralAI proceduralAI = ownerController.Brain;
@@ -862,11 +872,11 @@ namespace MHServerEmu.Games.GameData.Prototypes
             long currentTime = (long)game.CurrentTime.TotalMilliseconds;
 
             BehaviorBlackboard blackboard = ownerController.Blackboard;
-            long timeUpdate = blackboard.PropertyCollection[PropertyEnum.AICustomStateVal1]; // Error!!! replace to AICustomTimeVal1
+            long timeUpdate = blackboard.PropertyCollection[PropertyEnum.AICustomTimeVal1];
             int intervalUpdate = blackboard.PropertyCollection[PropertyEnum.AICustomStateVal1];
             if (currentTime >= (timeUpdate + intervalUpdate))
             {
-                blackboard.PropertyCollection[PropertyEnum.AICustomStateVal1] = currentTime; // Error!!! replace to AICustomTimeVal1
+                blackboard.PropertyCollection[PropertyEnum.AICustomTimeVal1] = currentTime;
                 GRandom random = game.Random;
                 intervalUpdate = random.Next(MinSpeedDegreeUpdateIntervalMS, MaxSpeedDegreeUpdateIntervalMS);
                 blackboard.PropertyCollection[PropertyEnum.AICustomStateVal1] = intervalUpdate;

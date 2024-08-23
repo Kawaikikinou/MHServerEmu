@@ -4,9 +4,9 @@ using MHServerEmu.Frontend;
 using MHServerEmu.Games;
 using MHServerEmu.Games.GameData;
 using MHServerEmu.Games.GameData.Calligraphy;
+using MHServerEmu.Games.GameData.Prototypes;
 using MHServerEmu.Games.Network;
 using MHServerEmu.Games.Regions;
-using MHServerEmu.Grouping;
 
 namespace MHServerEmu.Commands.Implementations
 {
@@ -22,6 +22,9 @@ namespace MHServerEmu.Commands.Implementations
             PrototypeId regionProtoRef = CommandHelper.FindPrototype(HardcodedBlueprints.Region, @params[0], client);
             if (regionProtoRef == PrototypeId.Invalid) return string.Empty;
 
+            RegionPrototype regionProto = regionProtoRef.As<RegionPrototype>();
+            if (regionProto == null) return $"Failed to load region prototype for id {regionProtoRef}";
+
             string regionName = GameDatabase.GetPrototypeName(regionProtoRef);
 
             // Check for unsafe warps (regions that are potentially missing assets and can make the client get stuck)
@@ -30,7 +33,7 @@ namespace MHServerEmu.Commands.Implementations
                 return $"Unsafe warp destination: {regionName}.";
 
             CommandHelper.TryGetPlayerConnection(client, out PlayerConnection playerConnection, out Game game);
-            game.MovePlayerToRegion(playerConnection, regionProtoRef, PrototypeId.Invalid);
+            playerConnection.MoveToTarget(regionProto.StartTarget);
             return $"Warping to {regionName}.";
         }
 
@@ -40,8 +43,10 @@ namespace MHServerEmu.Commands.Implementations
             if (client == null) return "You can only invoke this command from the game.";
 
             CommandHelper.TryGetPlayerConnection(client, out PlayerConnection playerConnection, out Game game);
-            game.MovePlayerToRegion(playerConnection, playerConnection.RegionDataRef, playerConnection.WaypointDataRef);
-            return $"Reloading region {GameDatabase.GetPrototypeName(playerConnection.RegionDataRef)}.";
+
+            playerConnection.MoveToTarget(playerConnection.TransferParams.DestTargetProtoRef);
+
+            return $"Reloading region {playerConnection.TransferParams.DestTargetRegionProtoRef.GetName()}.";
         }
 
         [Command("generateallsafe", "Generates all safe regions.\nUsage: region generateallsafe", AccountUserLevel.Admin)]
@@ -49,17 +54,18 @@ namespace MHServerEmu.Commands.Implementations
         {
             if (client == null) return "You can only invoke this command from the game.";
 
-            CommandHelper.TryGetGame(client, out Game game);
+            CommandHelper.TryGetPlayerConnection(client, out PlayerConnection playerConnection);
+            Game game = playerConnection.Game;
 
             int numRegions = 0;
 
-            foreach (var value in Enum.GetValues<RegionPrototypeId>())
+            foreach (RegionPrototypeId value in Enum.GetValues<RegionPrototypeId>())
             {
-                Task.Run(() => game.RegionManager.GetRegion(value));
+                game.RegionManager.GetOrGenerateRegionForPlayer((PrototypeId)value, playerConnection);
                 numRegions++;
             }
 
-            return $"Generating {numRegions} regions.";
+            return $"Generated {numRegions} regions.";
         }
     }
 }

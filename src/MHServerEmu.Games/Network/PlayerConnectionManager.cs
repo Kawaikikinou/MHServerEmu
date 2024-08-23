@@ -4,6 +4,7 @@ using MHServerEmu.Core.Logging;
 using MHServerEmu.Core.Network;
 using MHServerEmu.Frontend;
 using MHServerEmu.Games.Entities;
+using MHServerEmu.Games.Regions;
 
 namespace MHServerEmu.Games.Network
 {
@@ -67,27 +68,48 @@ namespace MHServerEmu.Games.Network
         }
 
         /// <summary>
-        /// Returns <see cref="PlayerConnection"/> instances that are bound to players that are interested in the provided <see cref="Entity"/>.
-        /// </summary>
-        public IEnumerable<PlayerConnection> GetInterestedClients(Entity entity, AOINetworkPolicyValues interestFilter = AOINetworkPolicyValues.DefaultPolicy, bool skipOwner = false)
-        {
-            foreach (Player player in GetInterestedPlayers(entity, interestFilter, skipOwner))
-                yield return player.PlayerConnection;
-        }
-
-        /// <summary>
         /// Returns <see cref="Player"/> instances that are interested in the provided <see cref="Entity"/>.
         /// </summary>
-        public IEnumerable<Player> GetInterestedPlayers(Entity entity, AOINetworkPolicyValues interestFilter = AOINetworkPolicyValues.DefaultPolicy, bool skipOwner = false)
+        public IEnumerable<Player> GetInterestedPlayers(Entity entity, AOINetworkPolicyValues interestFilter = AOINetworkPolicyValues.AllChannels, bool skipOwner = false)
         {
             foreach (Player player in new PlayerIterator(entity.Game))
             {
                 if (skipOwner && entity.IsOwnedBy(player.Id)) continue;
                 if (player.PlayerConnection == null) continue;  // This can happen during packet parsing
 
-                if (player.PlayerConnection.AOI.InterestedInEntity(entity.Id, interestFilter))
+                if (player.AOI.InterestedInEntity(entity.Id, interestFilter))
                     yield return player;
             }
+        }
+
+        /// <summary>
+        /// Returns <see cref="Player"/> instances that are interested in the provided <see cref="Region"/>.
+        /// </summary>
+        public IEnumerable<Player> GetInterestedPlayers(Region region)
+        {
+            foreach (Player player in new PlayerIterator(region))
+            {
+                if (player.AOI.Region == region)
+                    yield return player;
+            }
+        }
+
+        /// <summary>
+        /// Returns <see cref="PlayerConnection"/> instances that are bound to players that are interested in the provided <see cref="Entity"/>.
+        /// </summary>
+        public IEnumerable<PlayerConnection> GetInterestedClients(Entity entity, AOINetworkPolicyValues interestFilter = AOINetworkPolicyValues.AllChannels, bool skipOwner = false)
+        {
+            foreach (Player player in GetInterestedPlayers(entity, interestFilter, skipOwner))
+                yield return player.PlayerConnection;
+        }
+
+        /// <summary>
+        /// Returns <see cref="PlayerConnection"/> instances that are bound to players that are interested in the provided <see cref="Region"/>.
+        /// </summary>
+        public IEnumerable<PlayerConnection> GetInterestedClients(Region region)
+        {
+            foreach (Player player in GetInterestedPlayers(region))
+                yield return player.PlayerConnection;
         }
 
         public void Update()
@@ -112,10 +134,13 @@ namespace MHServerEmu.Games.Network
         }
 
         /// <summary>
-        /// Requests a player to be reloaded.
+        /// Requests a player to be loaded.
         /// </summary>
         public void SetPlayerConnectionPending(PlayerConnection playerConnection)
         {
+            // NOTE: We flush messages when we set the connection as pending so that
+            // we can deliver the loading screen message to the client ASAP.
+            playerConnection.FlushMessages();
             _pendingPlayerConnectionQueue.Enqueue(playerConnection);
         }
 
@@ -192,7 +217,7 @@ namespace MHServerEmu.Games.Network
         /// <summary>
         /// Sends the provided <see cref="IMessage"/> to all <see cref="PlayerConnection"/> instances that are interested in the provided <see cref="Entity"/>.
         /// </summary>
-        public void SendMessageToInterested(IMessage message, Entity entity, AOINetworkPolicyValues interestFilter = AOINetworkPolicyValues.DefaultPolicy, bool skipOwner = false)
+        public void SendMessageToInterested(IMessage message, Entity entity, AOINetworkPolicyValues interestFilter = AOINetworkPolicyValues.AllChannels, bool skipOwner = false)
         {
             foreach (PlayerConnection playerConnection in GetInterestedClients(entity, interestFilter, skipOwner))
                 playerConnection.SendMessage(message);
@@ -290,7 +315,7 @@ namespace MHServerEmu.Games.Network
             if (_dbIdConnectionDict.TryAdd(connection.PlayerDbId, connection) == false)
                 Logger.Warn($"AcceptAndRegisterNewClient(): Failed to add player id 0x{connection.PlayerDbId}");
 
-            SetPlayerConnectionPending(connection);
+            //SetPlayerConnectionPending(connection);   // This will be set when we receive region availability query response
 
             Logger.Info($"Accepted and registered client {client} to {_game}");
         }

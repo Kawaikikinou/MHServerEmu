@@ -5,6 +5,7 @@ using MHServerEmu.Core.Collisions;
 using MHServerEmu.Core.Extensions;
 using MHServerEmu.Core.Helpers;
 using MHServerEmu.Core.Logging;
+using MHServerEmu.Core.Serialization;
 using MHServerEmu.Core.VectorMath;
 using MHServerEmu.Games.Entities;
 using MHServerEmu.Games.Entities.Avatars;
@@ -14,13 +15,12 @@ using MHServerEmu.Games.GameData;
 using MHServerEmu.Games.GameData.Prototypes;
 using MHServerEmu.Games.Properties;
 using MHServerEmu.Games.Regions;
-using MHServerEmu.Games.Regions.Maps;
 
 namespace MHServerEmu.Games.Network
 {
     public class AreaOfInterest
     {
-        private const float UpdateDistanceSquared = 256f * 256f;
+        public const float UpdateDistanceSquared = 256f * 256f;
         private const float ViewExpansionDistance = 600.0f;
         private const float InvisibleExpansionDistance = 1200.0f;
 
@@ -34,10 +34,12 @@ namespace MHServerEmu.Games.Network
         private readonly Dictionary<uint, CellInterestStatus> _trackedCells = new();
         private readonly Dictionary<ulong, EntityInterestStatus> _trackedEntities = new();
 
-        private readonly Stack<EntityTrackingUpdate> _entityUpdateStack = new(64);
+        // See Update() for explanation on why we need two entity update stacks.
+        private readonly Stack<EntityTrackingUpdate> _entityUpdateStackPreEnvironment = new(64);
+        private readonly Stack<EntityTrackingUpdate> _entityUpdateStackPostEnvironment = new(64);
 
-        private PlayerConnection _playerConnection;
-        private Game _game;
+        private readonly PlayerConnection _playerConnection;
+        private readonly Game _game;
 
         private ulong _currentFrame = 0;
         private Vector3 _lastUpdatePosition = new();
@@ -49,11 +51,11 @@ namespace MHServerEmu.Games.Network
         private Aabb2 _entitiesVolume = new();
         private Aabb2 _visibleVolume = new();
         private Aabb2 _invisibleVolume = new();
-        private PrototypeId _lastCameraSetting;
+        private PrototypeId _lastCameraSettings;
 
         public Region Region { get; private set; }
-        public int CellsInRegion { get; set; }
-        public int LoadedCellCount { get; set; } = 0;
+        public ulong RegionId { get => Region != null ? Region.Id : 0; }
+        public int TrackedCellCount { get => _trackedCells.Count; }
         public int TrackedEntitiesCount { get => _trackedEntities.Count; }
         public float AOIVolume { get => _aoiVolume; set => SetAOIVolume(value); }
 
@@ -71,31 +73,35 @@ namespace MHServerEmu.Games.Network
             SetAOIVolume(aoiVolume);
         }
 
-        public void InitializePlayerView(PrototypeId cameraSettingPrototype)
+        public void InitializePlayerView(PrototypeId cameraSettingsProtoRef)
         {
             _cameraView = new Aabb2(new Vector3(_viewOffset, _viewOffset, 0.0f), _aoiVolume);
 
-            if (cameraSettingPrototype == PrototypeId.Invalid) return;
+            if (cameraSettingsProtoRef == PrototypeId.Invalid) return;
 
-            CameraSettingCollectionPrototype cameraSettingCollectionPrototype = GameDatabase.GetPrototype<CameraSettingCollectionPrototype>(cameraSettingPrototype);
-            if (cameraSettingCollectionPrototype == null)
+            var cameraSettingsProto = cameraSettingsProtoRef.As<CameraSettingCollectionPrototype>();
+            if (cameraSettingsProto == null)
             {
-                GlobalsPrototype globalsPrototype = GameDatabase.GlobalsPrototype;
-                if (globalsPrototype == null) return;
-                cameraSettingCollectionPrototype = GameDatabase.GetPrototype<CameraSettingCollectionPrototype>(globalsPrototype.PlayerCameraSettings);
+                // The input for this generally comes from the client, so we may get something weird here
+                Logger.Warn("InitializePlayerView(): cameraSettingsProto == null");
+                cameraSettingsProtoRef = GameDatabase.GlobalsPrototype.PlayerCameraSettings;
+                cameraSettingsProto = cameraSettingsProtoRef.As<CameraSettingCollectionPrototype>();
             }
 
-            if (cameraSettingCollectionPrototype.CameraSettings.IsNullOrEmpty()) return;
-            _lastCameraSetting = cameraSettingPrototype;
-            CameraSettingPrototype cameraSetting = cameraSettingCollectionPrototype.CameraSettings.First();
+            if (cameraSettingsProto.CameraSettings.IsNullOrEmpty()) return;
+            CameraSettingPrototype cameraSettingProto = cameraSettingsProto.CameraSettings[0];
 
-            var normalizedDirection = Vector3.Normalize2D(new(cameraSetting.DirectionX, cameraSetting.DirectionY, cameraSetting.DirectionZ));
-            float angle = Orientation.WrapAngleRadians(Orientation.FromDeltaVector2D(normalizedDirection).Yaw + MathHelper.Pi - MathHelper.PiOver4);
+            Vector3 normalizedDirection = Vector3.Normalize2D(new(cameraSettingProto.DirectionX, cameraSettingProto.DirectionY, cameraSettingProto.DirectionZ));
+            float angleInRadians = Orientation.FromDeltaVector2D(normalizedDirection).Yaw + MathHelper.Pi - MathHelper.PiOver4;
+            float angle = Orientation.WrapAngleRadians(angleInRadians);
             _cameraView = Transform3.RotationZ(angle) * _cameraView;
+
+            _lastCameraSettings = cameraSettingsProtoRef;
         }
 
-        public void Update(Vector3 position, bool forceUpdate = false, bool isStart = false)
+        public void Update(Vector3 position, bool forceUpdate = false, bool updateEntities = true)
         {
+            Region?.UpdateLastVisitedTime();
             _currentFrame++;
 
             // Unless forceUpdate is set, we update only when we move far enough from the last update position.
@@ -105,25 +111,47 @@ namespace MHServerEmu.Games.Network
 
             CalcVolumes(position);
 
-            if (isStart)
-            {
-                Area startArea = Region.GetAreaAtPosition(position);
-                AddArea(startArea, true);
-            }
-            else
-            {
-                UpdateEntities();
-            }               
+            // For everything to work correctly we need to make sure the environment (areas / cells) always exists client-side
+            // for world entities in the world. For this reason we remove entities before the environment and add them after.
+            // Losing proximity causes an entity to be removed from the world client-side, so we do that before the environment,
+            // but other policy modifications happen after, because gaining proximity causes an entity to enter the world.
 
+            // For the very first update when we switch to a region we skip entity scan because the client doesn't have any
+            // environment ready at that point. If we don't do the scan our update stacks will be empty.
+            if (updateEntities)
+                ScanEntities();
+
+            // Process pre-environment entity updates (exit world)
+            while (_entityUpdateStackPreEnvironment.Count > 0)
+            {
+                EntityTrackingUpdate update = _entityUpdateStackPreEnvironment.Pop();
+
+                switch (update.Operation)
+                {
+                    case InterestTrackOperation.Remove: RemoveEntity(update.Entity); break;
+                    case InterestTrackOperation.Modify: ModifyEntity(update.Entity, update.InterestPolicies); break;
+                    default: Logger.Warn($"Update(): Invalid pre-environment update: {update}"); break;
+                }
+            }
+
+            // Do the environment update (add / remove areas and cells client-side)
             UpdateAreas();
 
+            // We notify the client that it needs to regenerate its navi when cell updates change the navigable environment
             if (UpdateCells())
-            {
-                SendMessage(NetMessageEnvironmentUpdate.CreateBuilder().SetFlags(1).Build());
+                RegenerateClientNavi();
 
-                // Mini map (TODO: keep track of the map server-side)
-                LowResMap lowResMap = new(Region.RegionPrototype.AlwaysRevealFullMap);
-                SendMessage(ArchiveMessageBuilder.BuildUpdateMiniMapMessage(lowResMap));
+            // Process post-environment entity updates (enter world)
+            while (_entityUpdateStackPostEnvironment.Count > 0)
+            {
+                EntityTrackingUpdate update = _entityUpdateStackPostEnvironment.Pop();
+
+                switch (update.Operation)
+                {
+                    case InterestTrackOperation.Add:    AddEntity(update.Entity, update.InterestPolicies); break;
+                    case InterestTrackOperation.Modify: ModifyEntity(update.Entity, update.InterestPolicies); break;
+                    default: Logger.Warn($"Update(): Invalid post-environment update: {update}"); break;
+                }
             }
 
             _lastUpdatePosition = position;
@@ -166,27 +194,128 @@ namespace MHServerEmu.Games.Network
             return true;
         }
 
-        public void SetRegion(Region region)
+        public bool SetRegion(ulong regionId, bool clearingAllInterest, in Vector3? startPosition = null, in Orientation? startOrientation = null)
         {
-            // TEMP
-            Region = region;
-        }
+            Player player = _playerConnection.Player;
+            Region prevRegion = Region;
+            Region newRegion = null;
 
-        public void Reset()
-        {
-            _trackedAreas.Clear();
-            _trackedCells.Clear();
-
-            foreach (var kvp in _trackedEntities)
+            if (regionId != 0)
             {
-                Entity entity = _playerConnection.Game.EntityManager.GetEntity<Entity>(kvp.Key);
-                if (entity != null)
-                    SetEntityInterestPolicies(entity, InterestTrackOperation.Remove);
+                // Ignore region set requests unless they are clear requests or they are different from the current region
+                if (regionId == RegionId)
+                    return true;
+
+                // If we are not clearing region interest with an invalid region id, we need to have a valid region here
+                newRegion = _game.RegionManager.GetRegion(regionId);
+                if (newRegion == null) return Logger.WarnReturn(false, "SetRegion(): region == null");
             }
 
-            _currentFrame = 0;
-            CellsInRegion = 0;
-            _lastCameraSetting = 0;
+            prevRegion?.OnRemovedFromAOI(player);
+
+            // Reset previous state
+            _lastUpdatePosition = Vector3.Zero;
+            _lastCameraSettings = PrototypeId.Invalid;
+
+            foreach (var kvp in _trackedCells)
+            {
+                Cell cell = prevRegion.GetCellbyId(kvp.Key);
+                
+                if (cell == null)
+                {
+                    _trackedCells.Remove(kvp.Key);
+                    Logger.Warn("SetRegion(): cell == null");
+                    continue;
+                }
+
+                RemoveCell(cell, false);
+            }
+
+            if (_trackedCells.Count > 0) Logger.Warn("SetRegion(): _trackedCells.Count > 0");
+
+            foreach (var kvp in _trackedAreas)
+            {
+                Area area = prevRegion.GetAreaById(kvp.Key);
+
+                if (area == null)
+                {
+                    _trackedAreas.Remove(kvp.Key);
+                    Logger.Warn("SetRegion(): area == null");
+                    continue;
+                }
+
+                RemoveArea(area, false);
+            }
+
+            if (_trackedAreas.Count > 0) Logger.Warn("SetRegion(): _trackedAreas.Count > 0");
+
+            // Clear entities if requested
+            if (clearingAllInterest)
+            {
+                foreach (var kvp in _trackedEntities)
+                {
+                    Entity entity = _playerConnection.Game.EntityManager.GetEntity<Entity>(kvp.Key);
+                    if (entity != null)
+                        SetEntityInterestPolicies(entity, InterestTrackOperation.Remove);
+                }
+
+                if (_trackedEntities.Count > 0) Logger.Warn("SetRegion(): _trackedEntities.Count > 0");
+            }
+
+            // Change to the new region
+            Region = newRegion;
+
+            // Fill in required region change message fields
+            var regionChangeBuilder = NetMessageRegionChange.CreateBuilder()
+                .SetRegionId(regionId)
+                .SetServerGameId(_game.Id)
+                .SetClearingAllInterest(clearingAllInterest);
+
+            // Add additional region metadata if we have a valid region
+            if (newRegion != null)
+            {
+                regionChangeBuilder.SetRegionPrototypeId((ulong)newRegion.PrototypeDataRef)
+                    .SetRegionRandomSeed(newRegion.RandomSeed)
+                    .SetRegionMin(newRegion.Aabb.Min.ToNetStructPoint3())
+                    .SetRegionMax(newRegion.Aabb.Max.ToNetStructPoint3())
+                    .SetCreateRegionParams(NetStructCreateRegionParams.CreateBuilder()
+                        .SetLevel((uint)newRegion.RegionLevel)
+                        .SetDifficultyTierProtoId((ulong)newRegion.DifficultyTierRef));
+
+                // Can add EntitiesToDestroy here
+
+                using (Archive archive = new(ArchiveSerializeType.Replication, (ulong)AOINetworkPolicyValues.AllChannels))
+                {
+                    newRegion.Serialize(archive);
+                    regionChangeBuilder.SetArchiveData(archive.ToByteString());
+                }
+
+                player.QueueLoadingScreen(newRegion.PrototypeDataRef);
+            }
+
+            SendMessage(regionChangeBuilder.Build());
+
+            // TODO?: Prefetch other regions
+
+            // Teleport the player into our destination region if we have one
+            if (newRegion != null)
+            {
+                if (startPosition == null)
+                    return Logger.WarnReturn(false, "SetRegion(): No valid start position is provided");
+
+                newRegion.OnAddedToAOI(player);
+
+                // BeginTeleport() queues another loading screen, so we end up with two in a row. This matches our packet dumps.
+                player.BeginTeleport(regionId, startPosition.Value, startOrientation != null ? startOrientation.Value : Orientation.Zero);
+
+                Area startArea = Region.GetAreaAtPosition(startPosition.Value);
+                if (startArea == null) return Logger.WarnReturn(false, "SetRegion(): startArea == null");
+                AddArea(startArea, true);
+
+                Update(startPosition.Value, true, false);
+            }
+
+            return true;
         }
 
         public bool InterestedInArea(uint areaId)
@@ -202,26 +331,68 @@ namespace MHServerEmu.Games.Network
             return cellInterest.IsLoaded;
         }
 
-        public bool InterestedInEntity(ulong entityId, AOINetworkPolicyValues interestFilter = AOINetworkPolicyValues.DefaultPolicy)
+        public bool InterestedInEntity(ulong entityId, AOINetworkPolicyValues interestFilter = AOINetworkPolicyValues.AllChannels)
         {
             AOINetworkPolicyValues interestPolicies = GetCurrentInterestPolicies(entityId);
             return (interestPolicies & interestFilter) != AOINetworkPolicyValues.AOIChannelNone;
         }
 
-        public bool OnCellLoaded(uint cellId)
+        public bool ContainsPosition(in Vector3 position)
         {
-            if (_trackedCells.TryGetValue(cellId, out CellInterestStatus cell) == false)
-                Logger.WarnReturn(false, $"OnCellLoaded(): Loaded cell id {cell} is not being tracked!");
+            if (Region == null) return false;
 
-            LoadedCellCount++;
+            // Check all tracked areas
+            foreach (var areaKvp in _trackedAreas)
+            {
+                Area area = Region.GetAreaById(areaKvp.Key);
+                if (area == null)
+                {
+                    Logger.Warn("ContainsPosition(): area == null");
+                    continue;
+                }
+
+                // Skip areas that don't contain our position
+                if (area.IntersectsXY(position) == false)
+                    continue;
+
+                foreach (var cellKvp in area.Cells)
+                {
+                    // Skip untracked and unloaded cells
+                    if (InterestedInCell(cellKvp.Key) == false)
+                        continue;
+
+                    // Check if the cell contains requested position
+                    if (cellKvp.Value.IntersectsXY(position))
+                        return true;
+                }
+            }
+
+            return false;
+        }
+
+        public bool OnCellLoaded(uint cellId, ulong regionId)
+        {
+            if (regionId != RegionId)
+                return Logger.WarnReturn(false, $"OnCellLoaded(): Region id=0x{regionId:X} does not match tracked region id 0x{RegionId:X}");
+
+            if (_trackedCells.ContainsKey(cellId) == false)
+                return Logger.WarnReturn(false, $"OnCellLoaded(): Loaded cell id={cellId} is not being tracked!");
+
             _trackedCells[cellId] = new(_currentFrame, true);
             return true;
         }
 
-        public void ForceCellLoad()
+        public int GetLoadedCellCount()
         {
-            foreach (var kvp in _trackedCells.Where(kvp => kvp.Value.IsLoaded == false))
-                _trackedCells[kvp.Key] = new(_currentFrame, true);
+            int numLoaded = 0;
+
+            foreach (CellInterestStatus cellInterest in _trackedCells.Values)
+            {
+                if (cellInterest.IsLoaded)
+                    numLoaded++;
+            }
+
+            return numLoaded;
         }
 
         public string DebugPrint()
@@ -278,7 +449,7 @@ namespace MHServerEmu.Games.Network
                 Cell cell = invisibleCells.Pop();
                 RemoveCell(cell);
                 // EnvironmentUpdate
-                environmentUpdate |= cell.Area.IsDynamicArea() == false;
+                environmentUpdate |= cell.Area.IsDynamicArea == false;
             }
 
             // Add new cells
@@ -291,15 +462,14 @@ namespace MHServerEmu.Games.Network
                 {
                     AddCell(cell);
                     // EnvironmentUpdate
-                    environmentUpdate |= cell.Area.IsDynamicArea() == false;
+                    environmentUpdate |= cell.Area.IsDynamicArea == false;
                 }
             }
 
-            CellsInRegion = _trackedCells.Count;
             return environmentUpdate;
         }
 
-        private void UpdateEntities()
+        private void ScanEntities()
         {
             Region region = Region;
 
@@ -313,13 +483,13 @@ namespace MHServerEmu.Games.Network
                 if (wasInterested == false && isInterested)
                 {
                     // New entity found in proximity
-                    _entityUpdateStack.Push(new(InterestTrackOperation.Add, worldEntity, newInterestPolicies));
+                    _entityUpdateStackPostEnvironment.Push(new(InterestTrackOperation.Add, worldEntity, newInterestPolicies));
                 }
                 else if (wasInterested && isInterested == false)
                 {
                     // Entity left proximity and does not have any other interest policies
                     interestStatus.LastUpdateFrame = _currentFrame;
-                    _entityUpdateStack.Push(new(InterestTrackOperation.Remove, worldEntity));
+                    _entityUpdateStackPreEnvironment.Push(new(InterestTrackOperation.Remove, worldEntity));
                 }
                 else if (wasInterested && isInterested && interestStatus.InterestPolicies == newInterestPolicies)
                 {
@@ -349,39 +519,22 @@ namespace MHServerEmu.Games.Network
                 AOINetworkPolicyValues newInterestPolicies = GetNewInterestPolicies(entity);
                 if (newInterestPolicies == AOINetworkPolicyValues.AOIChannelNone)
                 {
-                    _entityUpdateStack.Push(new(InterestTrackOperation.Remove, entity));
+                    _entityUpdateStackPreEnvironment.Push(new(InterestTrackOperation.Remove, entity));
                     continue;
                 }
 
                 // Modify interest policies if they have changed
                 if (newInterestPolicies != interestStatus.InterestPolicies)
-                    _entityUpdateStack.Push(new(InterestTrackOperation.Modify, entity, newInterestPolicies));
-            }
-
-            //Logger.Debug($"------ AOI ENTITY UPDATE [{_entityUpdateStack.Count, 3}] ------");
-
-            // Process update stack
-            while (_entityUpdateStack.Count > 0)
-            {
-                EntityTrackingUpdate update = _entityUpdateStack.Pop();
-
-                //Logger.Debug(update.ToString());
-                
-                switch (update.Operation)
                 {
-                    case InterestTrackOperation.Add:
-                        AddEntity(update.Entity, update.InterestPolicies);
-                        break;
-                    case InterestTrackOperation.Remove:
-                        RemoveEntity(update.Entity);
-                        break;
-                    case InterestTrackOperation.Modify:
-                        ModifyEntity(update.Entity, update.InterestPolicies);
-                        break;
+                    // Losing proximity means exiting game world, so this needs to happen before we update the environment and potentially remove cells.
+                    AOINetworkPolicyValues lostPolicies = interestStatus.InterestPolicies & ~newInterestPolicies;
 
-                    default:
-                        Logger.Warn($"UpdateEntities(): Invalid update pushed to the stack ({update})");
-                        break;
+                    EntityTrackingUpdate modifyUpdate = new(InterestTrackOperation.Modify, entity, newInterestPolicies);
+
+                    if (lostPolicies.HasFlag(AOINetworkPolicyValues.AOIChannelProximity))
+                        _entityUpdateStackPreEnvironment.Push(modifyUpdate);
+                    else
+                        _entityUpdateStackPostEnvironment.Push(modifyUpdate);
                 }
             }
         }
@@ -389,41 +542,70 @@ namespace MHServerEmu.Games.Network
         private void AddArea(Area area, bool isStartArea)
         {
             _trackedAreas.Add(area.Id, new(_currentFrame));
-            SendMessage(area.MessageAddArea(isStartArea));
+
+            SendMessage(NetMessageAddArea.CreateBuilder()
+                .SetAreaId(area.Id)
+                .SetAreaPrototypeId((ulong)area.PrototypeDataRef)
+                .SetAreaOrigin(area.Origin.ToNetStructPoint3())
+                .SetIsStartArea(isStartArea)
+                .Build());
         }
 
-        private void RemoveArea(Area area)
+        private void RemoveArea(Area area, bool sendToClient = true)
         {
-            SendMessage(NetMessageRemoveArea.CreateBuilder()
-                .SetAreaId(area.Id)
-                .Build());
             _trackedAreas.Remove(area.Id);
+
+            if (sendToClient)
+            {
+                SendMessage(NetMessageRemoveArea.CreateBuilder()
+                    .SetAreaId(area.Id)
+                    .Build());
+            }
         }
 
         private void AddCell(Cell cell)
         {
-            SendMessage(cell.MessageCellCreate());
             _trackedCells.Add(cell.Id, new(_currentFrame, false));
+            cell.OnAddedToAOI();
+
+            var builder = NetMessageCellCreate.CreateBuilder()
+                .SetAreaId(cell.Area.Id)
+                .SetCellId(cell.Id)
+                .SetCellPrototypeId((ulong)cell.PrototypeDataRef)
+                .SetPositionInArea(cell.AreaPosition.ToNetStructPoint3())
+                .SetCellRandomSeed(cell.Area.RandomSeed)
+                .SetBufferwidth(cell.Settings.BufferWidth)
+                .SetOverrideLocationName((ulong)cell.Settings.OverrideLocationName);
+
+            foreach (ReservedSpawn reservedSpawn in cell.Encounters)
+                builder.AddEncounters(reservedSpawn.ToNetStruct());
+
+            SendMessage(builder.Build());
         }
 
-        private void RemoveCell(Cell cell)
+        private void RemoveCell(Cell cell, bool sendToClient = true)
         {
-            var areaId = cell.Area.Id;
-            if (_trackedAreas.ContainsKey(areaId))
+            _trackedCells.Remove(cell.Id);
+            cell.OnRemovedFromAOI();
+
+            uint areaId = cell.Area.Id;
+
+            if (sendToClient && _trackedAreas.ContainsKey(areaId))
             {
                 SendMessage(NetMessageCellDestroy.CreateBuilder()
                     .SetAreaId(areaId)
                     .SetCellId(cell.Id)
                     .Build());
             }
-            _trackedCells.Remove(cell.Id);
-            LoadedCellCount--;
+        }
+
+        private void RegenerateClientNavi()
+        {
+            SendMessage(NetMessageEnvironmentUpdate.CreateBuilder().SetFlags(1).Build());
         }
 
         private void AddEntity(Entity entity, AOINetworkPolicyValues interestPolicies, EntitySettings settings = null)
         {
-            SetEntityInterestPolicies(entity, InterestTrackOperation.Add, interestPolicies, interestPolicies);
-
             // Check inventory for visibility
             Inventory inventory = entity.InventoryLocation.GetInventory();
             bool includeInvLoc = inventory != null && InterestedInEntity(inventory.OwnerId)
@@ -431,6 +613,12 @@ namespace MHServerEmu.Games.Network
 
             // Build and send entity create message
             SendMessage(ArchiveMessageBuilder.BuildEntityCreateMessage(entity, interestPolicies, includeInvLoc, settings));
+
+            // Update interest policies
+            // NOTE: SetEntityInterestPolicies() calls OnPostAOIAddOrRemove(), which may cause this entity to be discovered.
+            // This needs to be sent after the create message so that the client is aware of the entity when it processes
+            // the discovery message.
+            SetEntityInterestPolicies(entity, InterestTrackOperation.Add, interestPolicies, interestPolicies);
 
             // Update contained entities
             ConsiderContainedEntities(entity, InterestTrackOperation.Add);
@@ -642,10 +830,6 @@ namespace MHServerEmu.Games.Network
 
             AOINetworkPolicyValues currentInterestPolicies = GetCurrentInterestPolicies(entity.Id);
 
-            // Do not add dead entities to AOI that weren't there already
-            if (entity.IsDead && currentInterestPolicies == AOINetworkPolicyValues.AOIChannelNone)
-                return AOINetworkPolicyValues.AOIChannelNone;
-
             // Filter out missiles that are simulated by the client on its own
             if (currentInterestPolicies.HasFlag(AOINetworkPolicyValues.AOIChannelClientIndependent))
                 return AOINetworkPolicyValues.AOIChannelClientIndependent;
@@ -668,15 +852,17 @@ namespace MHServerEmu.Games.Network
 
             if (entity is WorldEntity worldEntity)
             {
-                // Validate that the entity's location is valid on the client before including it in the proximity channel
-                if (worldEntity.IsInWorld && worldEntity.TestStatus(EntityStatus.ExitingWorld) == false
-                    && _visibleVolume.IntersectsXY(worldEntity.RegionLocation.Position) && InterestedInCell(worldEntity.Cell.Id))
+                // Do not add dead non-destructible entities to AOI that weren't there already
+                if (worldEntity.IsDead && worldEntity.IsDestructible == false && currentInterestPolicies == AOINetworkPolicyValues.AOIChannelNone)
+                    return AOINetworkPolicyValues.AOIChannelNone;
+
+                // Make sure this world entity is in the same region as our interest
+                bool isInRegion = worldEntity.IsInWorld && worldEntity.TestStatus(EntityStatus.ExitingWorld) == false && worldEntity.Region == Region;
+
+                // Make sure this world entity is within our interest volume
+                if (isInRegion && _visibleVolume.IntersectsXY(worldEntity.RegionLocation.Position) && InterestedInCell(worldEntity.Cell.Id))
                 {
                     newInterestPolicies |= AOINetworkPolicyValues.AOIChannelProximity;
-
-                    // HACK: Discover
-                    if (worldEntity.TrackAfterDiscovery && worldEntity is not Item)
-                        newInterestPolicies |= AOINetworkPolicyValues.AOIChannelDiscovery;
                 }
                 else if (inventoryInterestPolicies.HasFlag(AOINetworkPolicyValues.AOIChannelProximity))
                 {
@@ -684,10 +870,8 @@ namespace MHServerEmu.Games.Network
                     newInterestPolicies |= AOINetworkPolicyValues.AOIChannelProximity;
                 }
 
-                // Transfer discovery
-                // TODO: We probably need to keep track of discovered entities somewhere else
-                // so that they can remain discovered when we change regions.
-                if (currentInterestPolicies.HasFlag(AOINetworkPolicyValues.AOIChannelDiscovery))
+                // Discovery - we should not replicate discovered entities not in our region (e.g. saved discoveries from another region or equipped items on nearby avatars)
+                if (isInRegion && player.IsEntityDiscovered(worldEntity))
                     newInterestPolicies |= AOINetworkPolicyValues.AOIChannelDiscovery;
             }
 
@@ -696,7 +880,7 @@ namespace MHServerEmu.Games.Network
             if (entity.IsOwnedBy(player.Id))
                 newInterestPolicies |= AOINetworkPolicyValues.AOIChannelOwner;
 
-            // TODO: proper Discovery implementation, Party, Trade
+            // TODO: Party, Trade
 
             // Filter out results that don't match channels specified in the entity prototype
             if ((newInterestPolicies & entity.CompatibleReplicationChannels) == AOINetworkPolicyValues.AOIChannelNone)
@@ -758,7 +942,7 @@ namespace MHServerEmu.Games.Network
         {
             _aoiVolume = volume;
             _viewOffset = _aoiVolume / 8; // 3200 / 8 = 400
-            InitializePlayerView(_lastCameraSetting);
+            InitializePlayerView(_lastCameraSettings);
         }
 
         private void SendMessage(IMessage message)

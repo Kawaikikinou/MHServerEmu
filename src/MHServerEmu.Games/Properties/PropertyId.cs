@@ -71,6 +71,30 @@ namespace MHServerEmu.Games.Properties
         /// <summary>
         /// Constructs a <see cref="PropertyId"/> with the provided params
         /// </summary>
+        public PropertyId(PropertyEnum propertyEnum, PrototypeId param0, PropertyParam param1)
+        {
+            Raw = new PropertyId(propertyEnum, Property.ToParam(propertyEnum, 0, param0), param1).Raw;
+        }
+
+        /// <summary>
+        /// Constructs a <see cref="PropertyId"/> with the provided params
+        /// </summary>
+        public PropertyId(PropertyEnum propertyEnum, PropertyParam param0, PrototypeId param1)
+        {
+            Raw = new PropertyId(propertyEnum, param0, Property.ToParam(propertyEnum, 1, param1)).Raw;
+        }
+
+        /// <summary>
+        /// Constructs a <see cref="PropertyId"/> with the provided params
+        /// </summary>
+        public PropertyId(PropertyEnum propertyEnum, AssetId param0, AssetId param1)
+        {
+            Raw = new PropertyId(propertyEnum, Property.ToParam(param0), Property.ToParam(param1)).Raw;
+        }
+
+        /// <summary>
+        /// Constructs a <see cref="PropertyId"/> with the provided params
+        /// </summary>
         public PropertyId(PropertyEnum propertyEnum, PropertyEnum param0)
         {
             // This is for properties that have enums for other properties as their params (example: Requirement)

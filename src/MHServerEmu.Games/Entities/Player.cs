@@ -13,10 +13,8 @@ using MHServerEmu.Games.Entities.Inventories;
 using MHServerEmu.Games.Entities.Items;
 using MHServerEmu.Games.Entities.Options;
 using MHServerEmu.Games.Events;
-using MHServerEmu.Games.Events.LegacyImplementations;
 using MHServerEmu.Games.Events.Templates;
 using MHServerEmu.Games.GameData;
-using MHServerEmu.Games.GameData.LiveTuning;
 using MHServerEmu.Games.GameData.Prototypes;
 using MHServerEmu.Games.Missions;
 using MHServerEmu.Games.Navi;
@@ -24,6 +22,7 @@ using MHServerEmu.Games.Network;
 using MHServerEmu.Games.Powers;
 using MHServerEmu.Games.Properties;
 using MHServerEmu.Games.Regions;
+using MHServerEmu.Games.Regions.Maps;
 using MHServerEmu.Games.Regions.MatchQueues;
 using MHServerEmu.Games.Social.Communities;
 using MHServerEmu.Games.Social.Guilds;
@@ -61,11 +60,11 @@ namespace MHServerEmu.Games.Entities
         private readonly EventPointer<SwitchAvatarEvent> _switchAvatarEvent = new();
 
         private MissionManager _missionManager = new();
-        private ReplicatedPropertyCollection _avatarProperties;
+        private ReplicatedPropertyCollection _avatarProperties = new();
         private ulong _shardId;
-        private ReplicatedVariable<string> _playerName = new(0, string.Empty);
+        private RepString _playerName = new();
         private ulong[] _consoleAccountIds = new ulong[(int)PlayerAvatarIndex.Count];
-        private ReplicatedVariable<string> _secondaryPlayerName = new(0, string.Empty);
+        private RepString _secondaryPlayerName = new();
         private MatchQueueStatus _matchQueueStatus = new();
 
         // NOTE: EmailVerified and AccountCreationTimestamp are set in NetMessageGiftingRestrictionsUpdate that
@@ -74,7 +73,7 @@ namespace MHServerEmu.Games.Entities
         private bool _emailVerified;
         private TimeSpan _accountCreationTimestamp;     // UnixTime
 
-        private ReplicatedVariable<ulong> _partyId = new();
+        private RepULong _partyId;
 
         private ulong _guildId;
         private string _guildName;
@@ -87,22 +86,28 @@ namespace MHServerEmu.Games.Entities
         private AchievementState _achievementState = new();
         private Dictionary<PrototypeId, StashTabOptions> _stashTabOptionsDict = new();
 
+        // TODO: Serialize on migration
+        private Dictionary<ulong, MapDiscoveryData> _mapDiscoveryDict = new();
+
+        private TeleportData _teleportData;
+
         // Accessors
         public MissionManager MissionManager { get => _missionManager; }
         public ulong ShardId { get => _shardId; }
         public MatchQueueStatus MatchQueueStatus { get => _matchQueueStatus; }
         public bool EmailVerified { get => _emailVerified; set => _emailVerified = value; }
         public TimeSpan AccountCreationTimestamp { get => _accountCreationTimestamp; set => _accountCreationTimestamp = value; }
-        public override ulong PartyId { get => _partyId.Value; }
+        public override ulong PartyId { get => _partyId.Get(); }
         public Community Community { get => _community; }
         public GameplayOptions GameplayOptions { get => _gameplayOptions; }
         public AchievementState AchievementState { get => _achievementState; }
 
         public bool IsFullscreenMoviePlaying { get => Properties[PropertyEnum.FullScreenMoviePlaying]; }
-        public bool IsOnLoadingScreen { get; set; }
+        public bool IsOnLoadingScreen { get; private set; }
 
         // Network
         public PlayerConnection PlayerConnection { get; private set; }
+        public AreaOfInterest AOI { get => PlayerConnection.AOI; }
 
         // Avatars
         public Avatar CurrentAvatar { get; private set; }
@@ -131,11 +136,7 @@ namespace MHServerEmu.Games.Entities
 
             PlayerConnection = settings.PlayerConnection;
 
-            _avatarProperties = new(this, Game.CurrentRepId);
-            _shardId = 3;
-            _playerName = new(Game.CurrentRepId, string.Empty);
-            _secondaryPlayerName = new(0, string.Empty);
-            _partyId = new(Game.CurrentRepId, 0);
+            _shardId = 3;   // value from packet dumps
 
             Game.EntityManager.AddPlayer(this);
             _matchQueueStatus.SetOwner(this);
@@ -143,7 +144,28 @@ namespace MHServerEmu.Games.Entities
             _community = new(this);
             _community.Initialize();
 
+            // Default loading screen before we start loading into a region
+            QueueLoadingScreen(PrototypeId.Invalid);
+
             return true;
+        }
+
+        protected override void BindReplicatedFields()
+        {
+            base.BindReplicatedFields();
+
+            _avatarProperties.Bind(this, AOINetworkPolicyValues.AOIChannelOwner);
+            _playerName.Bind(this, AOINetworkPolicyValues.AOIChannelParty | AOINetworkPolicyValues.AOIChannelOwner);
+            _partyId.Bind(this, AOINetworkPolicyValues.AOIChannelParty | AOINetworkPolicyValues.AOIChannelOwner);
+        }
+
+        protected override void UnbindReplicatedFields()
+        {
+            base.UnbindReplicatedFields();
+
+            _avatarProperties.Unbind();
+            _playerName.Unbind();
+            _partyId.Unbind();
         }
 
         public override bool Serialize(Archive archive)
@@ -262,7 +284,7 @@ namespace MHServerEmu.Games.Entities
             }
 
             // Set name
-            _playerName.Value = account.PlayerName;    // NOTE: This is used for highlighting your name in leaderboards
+            _playerName.Set(account.PlayerName);    // NOTE: This is used for highlighting your name in leaderboards
 
             // Todo: send this separately in NetMessageGiftingRestrictionsUpdate on login
             Properties[PropertyEnum.LoginCount] = 1075;
@@ -272,13 +294,13 @@ namespace MHServerEmu.Games.Entities
             #region Hardcoded social tab easter eggs
             _community.AddMember(1, "DavidBrevik", CircleId.__Friends);
             _community.ReceiveMemberBroadcast(CommunityMemberBroadcast.CreateBuilder().SetMemberPlayerDbId(1).SetIsOnline(1)
-                .SetCurrentRegionRefId(12735255224807267622).SetCurrentDifficultyRefId((ulong)DifficultyTier.Normal)
+                .SetCurrentRegionRefId(12735255224807267622).SetCurrentDifficultyRefId((ulong)DifficultyTierPrototypeId.Normal)
                 .AddSlots(CommunityMemberAvatarSlot.CreateBuilder().SetAvatarRefId(15769648016960461069).SetCostumeRefId(4881398219179434365).SetLevel(60).SetPrestigeLevel(6))
                 .Build());
 
             _community.AddMember(2, "TonyStark", CircleId.__Friends);
             _community.ReceiveMemberBroadcast(CommunityMemberBroadcast.CreateBuilder().SetMemberPlayerDbId(2).SetIsOnline(1)
-                .SetCurrentRegionRefId((ulong)RegionPrototypeId.NPEAvengersTowerHUBRegion).SetCurrentDifficultyRefId((ulong)DifficultyTier.Normal)
+                .SetCurrentRegionRefId((ulong)RegionPrototypeId.NPEAvengersTowerHUBRegion).SetCurrentDifficultyRefId((ulong)DifficultyTierPrototypeId.Normal)
                 .AddSlots(CommunityMemberAvatarSlot.CreateBuilder().SetAvatarRefId(421791326977791218).SetCostumeRefId(7150542631074405762).SetLevel(60).SetPrestigeLevel(5))
                 .Build());
 
@@ -347,7 +369,7 @@ namespace MHServerEmu.Games.Entities
 
             account.Player.Credits = Properties[PropertyEnum.Currency, GameDatabase.CurrencyGlobalsPrototype.Credits];
 
-            foreach (Avatar avatar in IterateAvatars())
+            foreach (Avatar avatar in new AvatarIterator(this))
             {
                 DBAvatar dbAvatar = account.GetAvatar((long)avatar.PrototypeDataRef);
                 dbAvatar.RawCostume = avatar.Properties[PropertyEnum.CostumeCurrent];
@@ -386,20 +408,15 @@ namespace MHServerEmu.Games.Entities
         public override void ExitGame()
         {
             SendMessage(NetMessageBeginExitGame.DefaultInstance);
-            SendMessage(NetMessageRegionChange.CreateBuilder().SetRegionId(0).SetServerGameId(0).SetClearingAllInterest(true).Build());
-
-            PlayerConnection.AOI.Reset();
+            AOI.SetRegion(0, true);
 
             base.ExitGame();
         }
 
         public Region GetRegion()
         {
-            // TODO confirm if it's working
-            if (Game == null) return null;
-            var manager = Game.RegionManager;
-            if (manager == null) return null;
-            return manager.GetRegion(RegionId);
+            // This shouldn't need any null checks, at least for now
+            return AOI.Region;
         }
 
         /// <summary>
@@ -411,9 +428,9 @@ namespace MHServerEmu.Games.Entities
                 Logger.Warn("GetName(): avatarIndex out of range");
 
             if (avatarIndex == PlayerAvatarIndex.Secondary)
-                return _secondaryPlayerName.Value;
+                return _secondaryPlayerName.Get();
 
-            return _playerName.Value;
+            return _playerName.Get();
         }
 
         /// <summary>
@@ -642,7 +659,7 @@ namespace MHServerEmu.Games.Entities
                     continue;
                 }
 
-                PlayerConnection.AOI.ConsiderEntity(entity);
+                AOI.ConsiderEntity(entity);
             }
 
             return true;
@@ -783,13 +800,9 @@ namespace MHServerEmu.Games.Entities
         {
             if (avatarProtoRef == PrototypeId.Invalid) return Logger.WarnReturn<Avatar>(null, "GetAvatar(): avatarProtoRef == PrototypeId.Invalid");
 
-            foreach (Avatar avatar in IterateAvatars())
-            {
-                if (avatar.PrototypeDataRef == avatarProtoRef)
-                    return avatar;
-            }
+            AvatarIterator iterator = new(this, AvatarIteratorMode.IncludeArchived, avatarProtoRef);
 
-            return null;
+            return iterator.FirstOrDefault();
         }
 
         public Avatar GetActiveAvatarById(ulong avatarEntityId)
@@ -802,15 +815,6 @@ namespace MHServerEmu.Games.Entities
         {
             // TODO: Secondary avatar for consoles?
             return (index == 0) ? CurrentAvatar : null;
-        }
-        
-        public IEnumerable<Avatar> IterateAvatars()
-        {
-            foreach (Inventory inventory in new InventoryIterator(this, InventoryIterationFlags.PlayerAvatars))
-            {
-                foreach (var entry in inventory)
-                    yield return Game.EntityManager.GetEntity<Avatar>(entry.Id);
-            }
         }
 
         public Agent GetTeamUpAgent(PrototypeId teamUpProtoRef)
@@ -838,6 +842,12 @@ namespace MHServerEmu.Games.Entities
             return true;
         }
 
+        public void ScheduleSwitchAvatarEvent()
+        {
+            // Schedule avatar switch at the end of the current frame to let switch power application finish first
+            ScheduleEntityEvent(_switchAvatarEvent, TimeSpan.Zero);
+        }
+
         public bool SwitchAvatar()
         {
             // Retrieve pending avatar proto ref recorded in properties
@@ -852,9 +862,13 @@ namespace MHServerEmu.Games.Entities
             if (avatarProtoRef == PrototypeId.Invalid) return Logger.WarnReturn(false, "SwitchAvatar(): Failed to find pending avatar switch");
             Properties.RemovePropertyRange(PropertyEnum.AvatarSwitchPending);
 
-            // Do the switch
+            // Get information about the previous avatar
             ulong lastCurrentAvatarId = CurrentAvatar != null ? CurrentAvatar.Id : InvalidId;
+            ulong prevRegionId = CurrentAvatar.RegionLocation.RegionId;
+            Vector3 prevPosition = CurrentAvatar.RegionLocation.Position;
+            Orientation prevOrientation = CurrentAvatar.RegionLocation.Orientation;
 
+            // Do the switch
             Inventory avatarLibrary = GetInventory(InventoryConvenienceLabel.AvatarLibrary);
             Inventory avatarInPlay = GetInventory(InventoryConvenienceLabel.AvatarInPlay);
 
@@ -866,11 +880,11 @@ namespace MHServerEmu.Games.Entities
             if (result != InventoryResult.Success)
                 return Logger.WarnReturn(false, $"SwitchAvatar(): Failed to change library avatar's inventory location ({result})");
 
-            EnableCurrentAvatar(true, lastCurrentAvatarId);
+            EnableCurrentAvatar(true, lastCurrentAvatarId, prevRegionId, prevPosition, prevOrientation);
             return true;
         }
 
-        public bool EnableCurrentAvatar(bool withSwapInPower, ulong lastCurrentAvatarId)
+        public bool EnableCurrentAvatar(bool withSwapInPower, ulong lastCurrentAvatarId, ulong regionId, in Vector3 position, in Orientation orientation)
         {
             // TODO: Use this for teleportation within region as well
 
@@ -879,6 +893,10 @@ namespace MHServerEmu.Games.Entities
 
             if (CurrentAvatar.IsInWorld)
                 return Logger.WarnReturn(false, "EnableCurrentAvatar(): Current avatar is already active");
+
+            Region region = Game.RegionManager.GetRegion(regionId);
+            if (region == null)
+                return Logger.WarnReturn(false, "EnableCurrentAvtar(): region == null");
 
             Logger.Info($"EnableCurrentAvatar(): {CurrentAvatar} entering world");
 
@@ -891,7 +909,7 @@ namespace MHServerEmu.Games.Entities
             }
 
             // Add new avatar to the world
-            if (CurrentAvatar.EnterWorld(PlayerConnection.AOI.Region, PlayerConnection.LastPosition, PlayerConnection.LastOrientation, settings) == false)
+            if (CurrentAvatar.EnterWorld(region, CurrentAvatar.FloorToCenter(position), orientation, settings) == false)
                 return false;
 
             OnChangeActiveAvatar(0, lastCurrentAvatarId);
@@ -900,22 +918,22 @@ namespace MHServerEmu.Games.Entities
 
         #endregion
 
-        #region Messages
+        #region Loading and Teleports
 
-        public void SendMessage(IMessage message) => PlayerConnection?.SendMessage(message);
-
-        public void QueueLoadingScreen(PrototypeId regionPrototypeRef)
+        public void QueueLoadingScreen(PrototypeId regionProtoRef)
         {
-            // REMOVEME: Temp workaround for loading screen delay when generating regions
-            Game.NetworkManager.SendMessageImmediate(PlayerConnection, NetMessageQueueLoadingScreen.CreateBuilder()
-                .SetRegionPrototypeId((ulong)regionPrototypeRef)
-                .Build());
+            IsOnLoadingScreen = true;
 
-            /*
             SendMessage(NetMessageQueueLoadingScreen.CreateBuilder()
-                .SetRegionPrototypeId((ulong)regionPrototypeRef)
+                .SetRegionPrototypeId((ulong)regionProtoRef)
                 .Build());
-            */
+        }
+
+        public void QueueLoadingScreen(ulong regionId)
+        {
+            Region region = Game.RegionManager.GetRegion(regionId);
+            PrototypeId regionProtoRef = region != null ? region.PrototypeDataRef : PrototypeId.Invalid;
+            QueueLoadingScreen(regionProtoRef);
         }
 
         public void DequeueLoadingScreen()
@@ -923,7 +941,119 @@ namespace MHServerEmu.Games.Entities
             SendMessage(NetMessageDequeueLoadingScreen.DefaultInstance);
         }
 
+        public void OnLoadingScreenFinished()
+        {
+            IsOnLoadingScreen = false;
+        }
+
+        public void BeginTeleport(ulong regionId, in Vector3 position, in Orientation orientation)
+        {
+            _teleportData.Set(regionId, position, orientation);
+            QueueLoadingScreen(regionId);
+        }
+
+        public void OnCellLoaded(uint cellId, ulong regionId)
+        {
+            AOI.OnCellLoaded(cellId, regionId);
+            int numLoaded = AOI.GetLoadedCellCount();
+
+            Logger.Trace($"Player {this} loaded cell id={cellId} in region id=0x{regionId:X} ({numLoaded}/{AOI.TrackedCellCount})");
+
+            if (_teleportData.IsValid && numLoaded == AOI.TrackedCellCount)
+                FinishTeleport();
+        }
+
+        private bool FinishTeleport()
+        {
+            if (_teleportData.IsValid == false) return Logger.WarnReturn(false, "FinishTeleport(): No valid teleport data");
+
+            EnableCurrentAvatar(false, CurrentAvatar.Id, _teleportData.RegionId, _teleportData.Position, _teleportData.Orientation);
+            _teleportData.Clear();
+            DequeueLoadingScreen();
+            TryPlayIntroKismetSeqForRegion(CurrentAvatar.RegionLocation.RegionId);
+
+            return true;
+        }
+
         #endregion
+
+        #region Discovery
+
+        public MapDiscoveryData GetMapDiscoveryData(ulong regionId)
+        {
+            Region region = Game.RegionManager.GetRegion(regionId);
+            if (region == null) return Logger.WarnReturn<MapDiscoveryData>(null, "GetMapDiscoveryData(): region == null");
+
+            if (_mapDiscoveryDict.TryGetValue(regionId, out MapDiscoveryData mapDiscoveryData) == false)
+            {
+                mapDiscoveryData = new(region);
+                _mapDiscoveryDict.Add(regionId, mapDiscoveryData);
+            }
+
+            return mapDiscoveryData;
+        }
+
+        public MapDiscoveryData GetMapDiscoveryDataForEntity(WorldEntity worldEntity)
+        {
+            Region region = worldEntity?.Region;
+            if (region == null) return null;
+            return GetMapDiscoveryData(region.Id);
+        }
+
+        public bool DiscoverEntity(WorldEntity worldEntity, bool updateInterest)
+        {
+            MapDiscoveryData mapDiscoveryData = GetMapDiscoveryDataForEntity(worldEntity);
+            if (mapDiscoveryData == null) return Logger.WarnReturn(false, "DiscoverEntity(): mapDiscoveryData == null");
+
+            if (mapDiscoveryData.DiscoverEntity(worldEntity) == false)
+                return false;
+
+            if (updateInterest)
+                AOI.ConsiderEntity(worldEntity);
+
+            return true;
+        }
+
+        public bool UndiscoverEntity(WorldEntity worldEntity, bool updateInterest)
+        {
+            MapDiscoveryData mapDiscoveryData = GetMapDiscoveryDataForEntity(worldEntity);
+            if (mapDiscoveryData == null) return Logger.WarnReturn(false, "UndiscoverEntity(): mapDiscoveryData == null");
+
+            if (mapDiscoveryData.UndiscoverEntity(worldEntity) == false)
+                return false;
+
+            if (updateInterest)
+                AOI.ConsiderEntity(worldEntity);
+
+            return true;
+        }
+
+        public bool IsEntityDiscovered(WorldEntity worldEntity)
+        {
+            MapDiscoveryData mapDiscoveryData = GetMapDiscoveryDataForEntity(worldEntity);
+            return mapDiscoveryData != null && mapDiscoveryData.IsEntityDiscovered(worldEntity);
+        }
+
+        public bool SendMiniMapUpdate()
+        {
+            Logger.Trace($"SendMiniMapUpdate(): {this}");
+
+            Region region = GetRegion();
+            if (region == null) return Logger.WarnReturn(false, "SendMiniMapUpdate(): region == null");
+
+            MapDiscoveryData mapDiscoveryData = GetMapDiscoveryData(region.Id);
+            if (mapDiscoveryData == null) return Logger.WarnReturn(false, "SendMiniMapUpdate(): mapDiscoveryData == null");
+
+            LowResMap lowResMap = mapDiscoveryData.LowResMap;
+            if (lowResMap == null) return Logger.WarnReturn(false, "SendMiniMapUpdate(): lowResMap == null");
+
+            SendMessage(ArchiveMessageBuilder.BuildUpdateMiniMapMessage(lowResMap));
+            return true;
+        }
+
+        #endregion
+
+        public void SendMessage(IMessage message) => PlayerConnection?.SendMessage(message);
 
         public override void OnDeallocate()
         {
@@ -931,12 +1061,13 @@ namespace MHServerEmu.Games.Entities
             base.OnDeallocate();
         }
 
-        public void TryPlayKismetSeqIntroForRegion(PrototypeId regionPrototypeId)
+        public bool TryPlayIntroKismetSeqForRegion(ulong regionId)
         {
             // TODO/REMOVEME: Remove this when we have working Kismet sequence triggers
-            if (PlayerConnection.RegionDataRef == PrototypeId.Invalid) return;
+            Region region = Game.RegionManager.GetRegion(regionId);
+            if (region == null) return Logger.WarnReturn(false, "TryPlayIntroKismetSeqForRegion(): region == null");
 
-            KismetSeqPrototypeId kismetSeqRef = (RegionPrototypeId)regionPrototypeId switch
+            KismetSeqPrototypeId kismetSeqRef = (RegionPrototypeId)region.PrototypeDataRef switch
             {
                 RegionPrototypeId.NPERaftRegion             => KismetSeqPrototypeId.RaftHeliPadQuinJetLandingStart,
                 RegionPrototypeId.TimesSquareTutorialRegion => KismetSeqPrototypeId.Times01CaptainAmericaLanding,
@@ -944,7 +1075,11 @@ namespace MHServerEmu.Games.Entities
                 _ => 0
             };
 
-            if (kismetSeqRef != 0) PlayKismetSeq((PrototypeId)kismetSeqRef);
+            if (kismetSeqRef == 0)
+                return false;
+
+            PlayKismetSeq((PrototypeId)kismetSeqRef);
+            return true;
         }
 
         public void PlayKismetSeq(PrototypeId kismetSeqRef)
@@ -1062,6 +1197,29 @@ namespace MHServerEmu.Games.Entities
         private class SwitchAvatarEvent : CallMethodEvent<Entity>
         {
             protected override CallbackDelegate GetCallback() => (t) => ((Player)t).SwitchAvatar();
+        }
+
+        private struct TeleportData
+        {
+            public ulong RegionId { get; private set; }
+            public Vector3 Position { get; private set; }
+            public Orientation Orientation { get; private set; }
+
+            public bool IsValid { get => RegionId != 0; }
+
+            public void Set(ulong regionId, in Vector3 position, in Orientation orientation)
+            {
+                RegionId = regionId;
+                Position = position;
+                Orientation = orientation;
+            }
+
+            public void Clear()
+            {
+                RegionId = 0;
+                Position = Vector3.Zero;
+                Orientation = Orientation.Zero;
+            }
         }
     }
 }

@@ -310,22 +310,10 @@ namespace MHServerEmu.Games.Entities
             return GetEntityByDbGuid(dbGuid, flags & ~GetEntityFlags.DestroyedOnly) as T;
         }
 
-        public Transition GetTransitionInRegion(Destination destination, ulong regionId)
+        public bool IsEntityArchived(ulong entityId)
         {
-            PrototypeId areaRef = destination.AreaRef;
-            PrototypeId cellRef = destination.CellRef;
-            PrototypeId entityRef = destination.EntityRef;
-            foreach (var entity in _entityDict.Values)
-                if (entity.RegionId == regionId)
-                {
-                    if (entity is not Transition transition) continue;
-                    if (areaRef != 0 && areaRef != (PrototypeId)transition.RegionLocation.Area.PrototypeId) continue;
-                    if (cellRef != 0 && cellRef != transition.RegionLocation.Cell.PrototypeId) continue;
-                    if (transition.PrototypeDataRef == entityRef)
-                        return transition;
-                }
-
-            return default;
+            // TODO?
+            return false;
         }
 
         public IEnumerable<Entity> IterateEntities()

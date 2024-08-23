@@ -11,6 +11,7 @@ using MHServerEmu.Games.Entities.Inventories;
 using MHServerEmu.Games.Entities.Locomotion;
 using MHServerEmu.Games.Entities.PowerCollections;
 using MHServerEmu.Games.Events;
+using MHServerEmu.Games.Events.LegacyImplementations;
 using MHServerEmu.Games.Events.Templates;
 using MHServerEmu.Games.GameData;
 using MHServerEmu.Games.GameData.Calligraphy;
@@ -19,6 +20,7 @@ using MHServerEmu.Games.GameData.Tables;
 using MHServerEmu.Games.Network;
 using MHServerEmu.Games.Powers;
 using MHServerEmu.Games.Properties;
+using MHServerEmu.Games.Regions;
 using MHServerEmu.Games.Social.Guilds;
 
 namespace MHServerEmu.Games.Entities.Avatars
@@ -31,7 +33,7 @@ namespace MHServerEmu.Games.Entities.Avatars
         private readonly EventPointer<ActivateSwapInPowerEvent> _activateSwapInPowerEvent = new();
         private readonly EventPointer<RecheckContinuousPowerEvent> _recheckContinuousPowerEvent = new();
 
-        private ReplicatedVariable<string> _playerName = new(0, string.Empty);
+        private RepString _playerName;
         private ulong _ownerPlayerDbId;
         private List<AbilityKeyMapping> _abilityKeyMappingList = new();
 
@@ -43,7 +45,7 @@ namespace MHServerEmu.Games.Entities.Avatars
         private readonly PendingAction _pendingAction = new();
 
         public uint AvatarWorldInstanceId { get; } = 1;
-        public string PlayerName { get => _playerName.Value; }
+        public string PlayerName { get => _playerName.Get(); }
         public ulong OwnerPlayerDbId { get => _ownerPlayerDbId; }
         public AbilityKeyMapping CurrentAbilityKeyMapping { get => _abilityKeyMappingList.FirstOrDefault(); }
         public Agent CurrentTeamUpAgent { get => GetTeamUpAgent(Properties[PropertyEnum.AvatarTeamUpAgent]); }
@@ -79,6 +81,20 @@ namespace MHServerEmu.Games.Entities.Avatars
             return true;
         }
 
+        protected override void BindReplicatedFields()
+        {
+            base.BindReplicatedFields();
+
+            _playerName.Bind(this, AOINetworkPolicyValues.AOIChannelProximity | AOINetworkPolicyValues.AOIChannelParty | AOINetworkPolicyValues.AOIChannelOwner);
+        }
+
+        protected override void UnbindReplicatedFields()
+        {
+            base.UnbindReplicatedFields();
+
+            _playerName.Unbind();
+        }
+
         public override bool Serialize(Archive archive)
         {
             bool success = base.Serialize(archive);
@@ -102,7 +118,7 @@ namespace MHServerEmu.Games.Entities.Avatars
 
         public void SetPlayer(Player player)
         {
-            _playerName.Value = player.GetName();
+            _playerName.Set(player.GetName());
             _ownerPlayerDbId = player.DatabaseUniqueId;
         }
 
@@ -114,6 +130,87 @@ namespace MHServerEmu.Games.Entities.Avatars
                 return IsInPendingActionState(PendingActionState.FindingLandingSpot);
 
             return PendingActionState != PendingActionState.VariableActivation && PendingActionState != PendingActionState.AvatarSwitchInProgress;
+        }
+
+        public override ChangePositionResult ChangeRegionPosition(Vector3? position, Orientation? orientation, ChangePositionFlags flags = ChangePositionFlags.None)
+        {
+            if (RegionLocation.IsValid() == false)
+                return Logger.WarnReturn(ChangePositionResult.NotChanged, "ChangeRegionPosition(): Cannot change region position without entering the world first");
+
+            // We only need to do AOI processing if the avatar is changing its position
+            if (position == null)
+            {
+                if (orientation != null)
+                    return base.ChangeRegionPosition(position, orientation, flags);
+                else
+                    return Logger.WarnReturn(ChangePositionResult.NotChanged, "ChangeRegionPosition(): No position or orientation provided");
+            }
+
+            // Get player for AOI update
+            Player player = GetOwnerOfType<Player>();
+            if (player == null) return Logger.WarnReturn(ChangePositionResult.NotChanged, "ChangeRegionPosition(): player == null");
+
+            ChangePositionResult result;
+
+            if (player.AOI.ContainsPosition(position.Value))
+            {
+                // Do a normal position change and update AOI if the position is loaded
+                result = base.ChangeRegionPosition(position, orientation, flags);
+                if (result == ChangePositionResult.PositionChanged)
+                    player.AOI.Update(RegionLocation.Position);
+            }
+            else
+            {
+                // If we are moving outside of our AOI, start a teleport and exit world.
+                // The avatar will be put back into the world when all cells at the destination are loaded.
+                if (RegionLocation.Region.GetCellAtPosition(position.Value) == null)
+                    return Logger.WarnReturn(ChangePositionResult.InvalidPosition, $"ChangeRegionPosition(): Invalid position {position.Value}");
+
+                player.BeginTeleport(RegionLocation.RegionId, position.Value, orientation != null ? orientation.Value : Orientation.Zero);
+                ExitWorld();
+                player.AOI.Update(position.Value);
+                result = ChangePositionResult.Teleport;
+            }
+
+            return result;
+        }
+
+        public bool DoDeathRelease(DeathReleaseRequestType requestType)
+        {
+            // Resurrect
+            if (Resurrect() == false)
+                return Logger.WarnReturn(false, $"DoDeathRelease(): Failed to resurrect avatar {this}");
+
+            // Move to waypoint or some other place depending on the request and the region prototype
+            Region region = Region;
+            if (region == null) return Logger.WarnReturn(false, "DoDeathRelease(): region == null");
+
+            Player owner = GetOwnerOfType<Player>();
+            if (owner == null) return Logger.WarnReturn(false, "DoDeathRelease(): owner == null");
+
+            switch (requestType)
+            {
+                case DeathReleaseRequestType.Checkpoint:
+                    AvatarOnKilledInfoPrototype avatarOnKilledInfo = region.GetAvatarOnKilledInfo();
+                    if (avatarOnKilledInfo == null) return Logger.WarnReturn(false, "DoDeathRelease(): avatarOnKilledInfo == null");
+
+                    if (avatarOnKilledInfo.DeathReleaseBehavior == DeathReleaseBehavior.ReturnToWaypoint)
+                    {
+                        // TODO: Find the actual waypoint, for now just return to the start target for the region
+                        Transition.TeleportToLocalTarget(owner, region.Prototype.StartTarget);
+                    }
+                    else 
+                    {
+                        return Logger.WarnReturn(false, $"DoDeathRelease(): Unimplemented behavior {avatarOnKilledInfo.DeathReleaseBehavior}");
+                    }
+
+                    break;
+
+                default:
+                    return Logger.WarnReturn(false, $"DoDeathRelease(): Unimplemented request type {requestType}");
+            }
+
+            return true;
         }
 
         #endregion
@@ -366,8 +463,8 @@ namespace MHServerEmu.Games.Entities.Avatars
                             PowerUseResult result = CanActivatePower(continuousPower, targetId, targetPosition);
                             if (result == PowerUseResult.Success)
                                 ActivatePower(continuousPower, ref settings);
-                            else
-                                Logger.Debug($"CheckContinuousPower(): result={result}");
+                            //else
+                            //    Logger.Debug($"CheckContinuousPower(): result={result}");
                         }
                     }
                 }
@@ -386,7 +483,7 @@ namespace MHServerEmu.Games.Entities.Avatars
 
         public void CancelPendingAction()
         {
-            Logger.Debug("CancelPendingAction()");
+            //Logger.Debug("CancelPendingAction()");
             _pendingAction.Clear();
         }
 
@@ -594,6 +691,42 @@ namespace MHServerEmu.Games.Entities.Avatars
 
         #endregion
 
+        #region Interaction
+
+        public override bool UseInteractableObject(ulong entityId, PrototypeId missionProtoRef)
+        {
+            Player player = GetOwnerOfType<Player>();
+            if (player == null) return Logger.WarnReturn(false, "UseInteractableObject(): player == null");
+
+            if (missionProtoRef != PrototypeId.Invalid)
+            {
+                // We need to send NetMessageMissionInteractRelease here, or the client UI will get locked
+                Logger.Debug($"UseInteractableObject(): missionProtoRef={missionProtoRef.GetName()}");
+                player.SendMessage(NetMessageMissionInteractRelease.DefaultInstance);
+            }
+
+            var interactableObject = Game.EntityManager.GetEntity<WorldEntity>(entityId);
+            if (interactableObject == null) return Logger.WarnReturn(false, "UseInteractableObject(): interactableObject == null");
+
+            Logger.Trace($"UseInteractableObject(): {this} => {interactableObject}");
+
+            if (interactableObject is Transition transition)
+            {
+                transition.UseTransition(player);
+            }
+            else
+            {
+                // REMOVEME
+                EventPointer<OLD_UseInteractableObjectEvent> eventPointer = new();
+                Game.GameEventScheduler.ScheduleEvent(eventPointer, TimeSpan.Zero);
+                eventPointer.Get().Initialize(player, interactableObject);
+            }
+
+            return true;
+        }
+
+        #endregion
+
         #region Inventories
 
         public InventoryResult GetEquipmentInventoryAvailableStatus(PrototypeId invProtoRef)
@@ -751,6 +884,17 @@ namespace MHServerEmu.Games.Entities.Avatars
         {
             base.OnEnteredWorld(settings);
             AssignDefaultAvatarPowers();
+
+            // Update AOI of the owner player
+            Player player = GetOwnerOfType<Player>();
+            if (player == null)
+            {
+                Logger.Warn("OnEnteredWorld(): player == null");
+                return;
+            }
+
+            AreaOfInterest aoi = player.AOI;
+            aoi.Update(RegionLocation.Position, true);
         }
 
         public override void OnExitedWorld()

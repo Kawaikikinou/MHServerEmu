@@ -4,6 +4,7 @@ using Gazillion;
 using Google.ProtocolBuffers;
 using MHServerEmu.Core.Config;
 using MHServerEmu.Core.Extensions;
+using MHServerEmu.Core.Helpers;
 using MHServerEmu.Core.Logging;
 using MHServerEmu.Core.Network;
 using MHServerEmu.Core.System.Random;
@@ -25,6 +26,12 @@ using MHServerEmu.Games.Regions;
 
 namespace MHServerEmu.Games
 {
+    public enum GameShutdownReason
+    {
+        ServerShuttingDown,
+        GameInstanceCrash
+    }
+
     public partial class Game
     {
         public const string Version = "1.52.0.1700";
@@ -45,14 +52,17 @@ namespace MHServerEmu.Games
         private TimeSpan _lastFixedTimeUpdateProcessTime;                   // How long the last fixed update took
         private int _frameCount;
 
-        private bool _isRunning;
+        private int _liveTuningChangeNum;
+
         private Thread _gameThread;
-        private Task _regionCleanupTask;
 
         private ulong _currentRepId;
 
         // Dumped ids: 0xF9E00000FA2B3EA (Lobby), 0xFF800000FA23AE9 (Tower), 0xF4A00000FA2B47D (Danger Room), 0xFCC00000FA29FE7 (Midtown)
         public ulong Id { get; }
+        public bool IsRunning { get; private set; } = false;
+        public bool HasBeenShutDown { get; private set; } = false;
+
         public GRandom Random { get; } = new();
         public PlayerConnectionManager NetworkManager { get; }
         public EventScheduler GameEventScheduler { get; private set; }
@@ -69,7 +79,6 @@ namespace MHServerEmu.Games
         public ulong NumQuantumFixedTimeUpdates { get => (ulong)CurrentTime.CalcNumTimeQuantums(FixedTimeBetweenUpdates); }
 
         public ulong CurrentRepId { get => ++_currentRepId; }
-        // We use a dictionary property instead of AccessMessageHandlerHash(), which is essentially just a getter
         public Dictionary<ulong, IArchiveMessageHandler> MessageHandlerDict { get; } = new();
 
         public override string ToString() => $"serverGameId=0x{Id:X}";
@@ -113,6 +122,7 @@ namespace MHServerEmu.Games
 
             LiveTuningManager.Instance.CopyLiveTuningData(LiveTuningData);
             LiveTuningData.GetLiveTuningUpdate();   // pre-generate update protobuf
+            _liveTuningChangeNum = LiveTuningData.ChangeNum;
 
             return success;
         }
@@ -121,17 +131,45 @@ namespace MHServerEmu.Games
         {
             // NOTE: This is now separate from the constructor so that we can have
             // a dummy game with no simulation running that we use to parse messages.
-            if (_isRunning) throw new InvalidOperationException();
-            _isRunning = true;
-
-            // Run a task that cleans up unused regions periodically
-            _regionCleanupTask = Task.Run(async () => await RegionManager.CleanUpRegionsAsync());
+            if (IsRunning) throw new InvalidOperationException();
+            IsRunning = true;
 
             // Initialize and start game thread
-            _gameThread = new(Update) { IsBackground = true, CurrentCulture = CultureInfo.InvariantCulture };
+            _gameThread = new(GameLoop) { IsBackground = true, CurrentCulture = CultureInfo.InvariantCulture };
             _gameThread.Start();
 
             Logger.Info($"Game 0x{Id:X} started, initial replication id: {_currentRepId}");
+        }
+
+        public void Shutdown(GameShutdownReason reason)
+        {
+            if (IsRunning == false || HasBeenShutDown)
+                return;
+
+            Logger.Info($"Game shutdown requested. Game={this}, Reason={reason}");
+
+            // Cancel all events
+            GameEventScheduler.CancelAllEvents();
+
+            // Clean up network manager
+            NetworkManager.SendAllPendingMessages();
+            foreach (PlayerConnection playerConnection in NetworkManager)
+                playerConnection.Disconnect();
+            NetworkManager.Update();        // We need this to process player saves (for now)
+
+            // Clean up regions
+            RegionManager.DestroyAllRegions();
+
+            // Mark this game as shut down for the player manager
+            HasBeenShutDown = true;
+        }
+
+        public void RequestShutdown()
+        {
+            if (IsRunning == false || HasBeenShutDown)
+                return;
+
+            IsRunning = false;
         }
 
         public void AddClient(FrontendClient client)
@@ -163,31 +201,6 @@ namespace MHServerEmu.Games
         public void BroadcastMessage(IMessage message)
         {
             NetworkManager.BroadcastMessage(message);
-        }
-
-        public void MovePlayerToRegion(PlayerConnection playerConnection, PrototypeId regionDataRef, PrototypeId waypointDataRef)
-        {
-            playerConnection.ExitGame();
-
-            playerConnection.RegionDataRef = regionDataRef;
-            playerConnection.WaypointDataRef = waypointDataRef;
-
-            NetworkManager.SetPlayerConnectionPending(playerConnection);
-        }
-
-        public void MovePlayerToEntity(PlayerConnection playerConnection, ulong entityId)
-        {
-            // TODO change Reload without exit of region
-            var entityManager = playerConnection.Game.EntityManager;
-            var worldEntity = entityManager.GetEntity<WorldEntity>(entityId);
-            if (worldEntity == null) return;
-
-            playerConnection.ExitGame();
-
-            playerConnection.RegionDataRef = (PrototypeId)worldEntity.Region.PrototypeId;
-            playerConnection.EntityToTeleport = worldEntity;
-
-            NetworkManager.SetPlayerConnectionPending(playerConnection);
         }
 
         public Entity AllocateEntity(PrototypeId entityRef)
@@ -255,23 +268,40 @@ namespace MHServerEmu.Games
         public static long GetTimeFromStart(TimeSpan gameTime) => (long)(gameTime - StartTime).TotalMilliseconds;
         public static TimeSpan GetTimeFromDelta(long delta) => StartTime.Add(TimeSpan.FromMilliseconds(delta));
 
-        private void Update()
+        private void GameLoop()
         {
             Current = this;
             _gameTimer.Start();
 
-            while (true)
+            try
             {
-                // NOTE: We process input in NetworkManager.ReceiveAllPendingMessages() outside of UpdateFixedTime(), same as the client.
+                while (IsRunning)
+                {
+                    Update();
+                }
 
-                NetworkManager.Update();                            // Add / remove clients
-                NetworkManager.ReceiveAllPendingMessages();         // Process input
-                NetworkManager.ProcessPendingPlayerConnections();   // Load pending players
-
-                UpdateFixedTime();                                  // Update simulation state
-
-                RegionManager.ProcessPendingRegions();              // Process any regions pending shutdowns (TODO: Add generation here as well)
+                Shutdown(GameShutdownReason.ServerShuttingDown);
             }
+            catch (Exception e)
+            {
+                HandleGameInstanceCrash(e);
+                Shutdown(GameShutdownReason.GameInstanceCrash);
+            }
+        }
+
+        private void Update()
+        {
+            // NOTE: We process input in NetworkManager.ReceiveAllPendingMessages() outside of UpdateFixedTime(), same as the client.
+
+            NetworkManager.Update();                            // Add / remove clients
+            NetworkManager.ReceiveAllPendingMessages();         // Process input
+            NetworkManager.ProcessPendingPlayerConnections();   // Load pending players
+
+            RegionManager.Update();                             // Clean up old regions
+
+            UpdateLiveTuning();                                 // Check if live tuning data is out of date
+
+            UpdateFixedTime();                                  // Update simulation state
         }
 
         private void UpdateFixedTime()
@@ -328,6 +358,54 @@ namespace MHServerEmu.Games
 
             // Send responses to all clients
             NetworkManager.SendAllPendingMessages();
+        }
+
+        private void UpdateLiveTuning()
+        {
+            // This won't do anything unless this game's live tuning data is out of date
+            LiveTuningManager.Instance.CopyLiveTuningData(LiveTuningData);  
+
+            if (_liveTuningChangeNum != LiveTuningData.ChangeNum)
+            {
+                NetworkManager.BroadcastMessage(LiveTuningData.GetLiveTuningUpdate());
+                _liveTuningChangeNum = LiveTuningData.ChangeNum;
+            }
+        }
+
+        private void HandleGameInstanceCrash(Exception exception)
+        {
+#if DEBUG
+            const string buildConfiguration = "Debug";
+#elif RELEASE
+            const string buildConfiguration = "Release";
+#endif
+
+            DateTime now = DateTime.Now;
+
+            string crashReportDir = Path.Combine(FileHelper.ServerRoot, "CrashReports");
+            if (Directory.Exists(crashReportDir) == false)
+                Directory.CreateDirectory(crashReportDir);
+
+            string crashReportFilePath = Path.Combine(crashReportDir, $"GameInstanceCrash_{now:yyyy-dd-MM_HH.mm.ss}.txt");
+
+            using (StreamWriter writer = new(crashReportFilePath))
+            {
+                writer.WriteLine(string.Format("Assembly Version: {0} | {1} UTC | {2}\n",
+                    AssemblyHelper.GetAssemblyInformationalVersion(),
+                    AssemblyHelper.ParseAssemblyBuildTime().ToString("yyyy.MM.dd HH:mm:ss"),
+                    buildConfiguration));
+
+                writer.WriteLine($"Local Server Time: {now:yyyy.MM.dd HH:mm:ss.fff}\n");
+
+                writer.WriteLine($"Active Regions:");
+                foreach (Region region in RegionIterator())
+                    writer.WriteLine(region.ToString());
+                writer.WriteLine();
+
+                writer.WriteLine($"Exception:\n{exception}");
+            }
+
+            Logger.ErrorException(exception, $"Game instance crashed, report saved to {crashReportFilePath}");
         }
     }
 }

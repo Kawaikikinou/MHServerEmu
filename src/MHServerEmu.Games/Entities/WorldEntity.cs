@@ -6,6 +6,7 @@ using MHServerEmu.Core.Logging;
 using MHServerEmu.Core.Serialization;
 using MHServerEmu.Core.System.Time;
 using MHServerEmu.Core.VectorMath;
+using MHServerEmu.Games.Behavior;
 using MHServerEmu.Games.Common;
 using MHServerEmu.Games.Dialog;
 using MHServerEmu.Games.Entities.Avatars;
@@ -52,7 +53,7 @@ namespace MHServerEmu.Games.Entities
         Teleport            = 1 << 6,
         HighFlying          = 1 << 7,
         PhysicsResolve      = 1 << 8,
-        SkipAOI             = 1 << 9,
+        SkipInterestUpdate  = 1 << 9,
         EnterWorld          = 1 << 10,
     }
 
@@ -61,6 +62,7 @@ namespace MHServerEmu.Games.Entities
         InvalidPosition,
         PositionChanged,
         NotChanged,
+        Teleport
     }
 
     public partial class WorldEntity : Entity
@@ -72,10 +74,17 @@ namespace MHServerEmu.Games.Entities
         private AlliancePrototype _allianceProto;
         private Transform3 _transform = Transform3.Identity();
 
+        // We keep track of the last interest update position to avoid updating interest too often when moving around.
+        private Vector3 _lastInterestUpdatePosition = Vector3.Zero;     
+
         protected EntityTrackingContextMap _trackingContextMap;
         protected ConditionCollection _conditionCollection;
         protected PowerCollection _powerCollection;
         protected int _unkEvent;
+
+        public Event<EntityCollisionEvent> OverlapBeginEvent = new();
+        public Event<EntityCollisionEvent> CollideEvent = new();
+        public Event<EntityCollisionEvent> OverlapEndEvent = new();
 
         public EntityTrackingContextMap TrackingContextMap { get => _trackingContextMap; }
         public ConditionCollection ConditionCollection { get => _conditionCollection; }
@@ -92,7 +101,6 @@ namespace MHServerEmu.Games.Entities
         public NaviMesh NaviMesh { get => RegionLocation.NaviMesh; }
         public Orientation Orientation { get => RegionLocation.Orientation; }
         public WorldEntityPrototype WorldEntityPrototype { get => Prototype as WorldEntityPrototype; }
-        public bool TrackAfterDiscovery { get; private set; }
         public bool ShouldSnapToFloorOnSpawn { get; private set; }
         public EntityActionComponent EntityActionComponent { get; protected set; }
         public SpawnSpec SpawnSpec { get; private set; }
@@ -112,7 +120,7 @@ namespace MHServerEmu.Games.Entities
         public PrototypeId ActivePowerRef { get; protected set; }
         public Power ActivePower { get => GetActivePower(); }
         public bool IsExecutingPower { get => ActivePowerRef != PrototypeId.Invalid; }
-
+        public PrototypeId[] Keywords { get => WorldEntityPrototype?.Keywords; }
         public Vector3 Forward { get => GetTransform().Col0; }
         public Vector3 GetUp { get => GetTransform().Col2; }
         public float MovementSpeedRate { get => Properties[PropertyEnum.MovementSpeedRate]; } // PropertyTemp[PropertyEnum.MovementSpeedRate]
@@ -128,6 +136,7 @@ namespace MHServerEmu.Games.Entities
         public bool IsHighFlying { get => Locomotor?.IsHighFlying ?? false; }
         public bool IsDestructible { get => HasKeyword(GameDatabase.KeywordGlobalsPrototype.DestructibleKeyword); }
         public bool IsDestroyProtectedEntity { get => IsControlledEntity || IsTeamUpAgent || this is Avatar; }  // Persistent entities cannot be easily destroyed
+        public bool IsDiscoverable { get => CompatibleReplicationChannels.HasFlag(AOINetworkPolicyValues.AOIChannelDiscovery); }
 
         public WorldEntity(Game game) : base(game)
         {
@@ -218,10 +227,10 @@ namespace MHServerEmu.Games.Entities
                 }
             }
 
-            // HACK: Schedule respawn using SpawnSpec
-            if (SpawnSpec != null)
+            // HACK: Schedule respawn in public zones using SpawnSpec
+            if (RegionLocation.Region != null && RegionLocation.Region.IsPublic && SpawnSpec != null)
             {
-                Logger.Debug($"Respawn scheduled for {this}");
+                Logger.Trace($"Respawn scheduled for {this}");
                 EventPointer<TEMP_SpawnEntityEvent> eventPointer = new();
                 Game.GameEventScheduler.ScheduleEvent(eventPointer, Game.CustomGameOptions.WorldEntityRespawnTime);
                 eventPointer.Get().Initialize(SpawnSpec);
@@ -295,17 +304,13 @@ namespace MHServerEmu.Games.Entities
 
         public virtual bool EnterWorld(Region region, Vector3 position, Orientation orientation, EntitySettings settings = null)
         {
-            var proto = WorldEntityPrototype;
-            if (proto.ObjectiveInfo != null)
-                TrackAfterDiscovery = proto.ObjectiveInfo.TrackAfterDiscovery;
-
             SetStatus(EntityStatus.EnteringWorld, true);
 
             RegionLocation.Region = region;
 
             Physics.AcquireCollisionId();
 
-            if (ChangeRegionPosition(position, orientation, ChangePositionFlags.DoNotSendToClients | ChangePositionFlags.SkipAOI) == ChangePositionResult.PositionChanged)
+            if (ChangeRegionPosition(position, orientation, ChangePositionFlags.DoNotSendToClients | ChangePositionFlags.SkipInterestUpdate) == ChangePositionResult.PositionChanged)
                 OnEnteredWorld(settings);
             else
                 ClearWorldLocation();
@@ -339,6 +344,12 @@ namespace MHServerEmu.Games.Entities
                 SetStatus(EntityStatus.ExitingWorld, false);
         }
 
+        public override void UpdateInterestPolicies(bool updateForAllPlayers, EntitySettings settings = null)
+        {
+            base.UpdateInterestPolicies(updateForAllPlayers, settings);
+            _lastInterestUpdatePosition = IsInWorld ? RegionLocation.Position : Vector3.Zero;
+        }
+
         public SimulateResult UpdateSimulationState()
         {
             // Never simulate when not in the world
@@ -353,8 +364,9 @@ namespace MHServerEmu.Games.Entities
             if (IsTeamUpAgent)
                 return SetSimulated(true);
 
-            // Simulate is there are any player interested in this world entity
-            return SetSimulated(InterestReferences.IsAnyPlayerInterested(AOINetworkPolicyValues.AOIChannelProximity) ||
+            // Simulate is there are any player interested in this world entity or its cell
+            return SetSimulated(Cell?.HasAnyInterest == true ||
+                                InterestReferences.IsAnyPlayerInterested(AOINetworkPolicyValues.AOIChannelProximity) ||
                                 InterestReferences.IsAnyPlayerInterested(AOINetworkPolicyValues.AOIChannelClientIndependent));
         }
 
@@ -372,6 +384,7 @@ namespace MHServerEmu.Games.Entities
         {
             bool positionChanged = false;
             bool orientationChanged = false;
+            Cell previousCell = Cell;
 
             RegionLocation preChangeLocation = new(RegionLocation);
             Region region = Game.RegionManager.GetRegion(preChangeLocation.RegionId);
@@ -382,9 +395,11 @@ namespace MHServerEmu.Games.Entities
                 var result = RegionLocation.SetPosition(position.Value);
 
                 if (result != RegionLocation.SetPositionResult.Success)     // onSetPositionFailure()
+                {
                     return Logger.WarnReturn(ChangePositionResult.NotChanged, string.Format(
                         "ChangeRegionPosition(): Failed to set entity new position (Moved out of world)\n\tEntity: {0}\n\tResult: {1}\n\tPrev Loc: {2}\n\tNew Pos: {3}",
                         this, result, RegionLocation, position));
+                }
 
                 if (Bounds.Geometry != GeometryType.None)
                     Bounds.Center = position.Value;
@@ -427,6 +442,17 @@ namespace MHServerEmu.Games.Entities
             if (RegionLocation.IsValid())
                 ExitWorldRegionLocation.Set(RegionLocation);
 
+            if (positionChanged && flags.HasFlag(ChangePositionFlags.SkipInterestUpdate) == false)
+            {
+                // Update interest when this world entity moves to another cell or it has moved far enough from the last interest update position
+                if (Cell != null &&
+                   (Cell != previousCell || Vector3.DistanceSquared2D(_lastInterestUpdatePosition, RegionLocation.Position) >= AreaOfInterest.UpdateDistanceSquared))
+                {
+                    UpdateInterestPolicies(true);
+                }
+            }
+
+            // Send position to clients if needed
             if (flags.HasFlag(ChangePositionFlags.DoNotSendToClients) == false)
             {
                 bool excludeOwner = flags.HasFlag(ChangePositionFlags.DoNotSendToOwner);
@@ -444,12 +470,6 @@ namespace MHServerEmu.Games.Entities
 
                     networkManager.SendMessageToMultiple(interestedClients, entityPositionMessageBuilder.Build());
                 }
-            }
-
-            if (Cell != null && flags.HasFlag(ChangePositionFlags.SkipAOI) == false)
-            {
-                // TODO: Notify if distance is far enough, similar to AOI updates
-                UpdateInterestPolicies(true);
             }
 
             return ChangePositionResult.PositionChanged;
@@ -1126,17 +1146,27 @@ namespace MHServerEmu.Games.Entities
 
             // Change health to the new value
             WorldEntity powerUser = Game.EntityManager.GetEntity<WorldEntity>(powerResults.PowerOwnerId);
+            WorldEntity ultimatePowerUser = Game.EntityManager.GetEntity<WorldEntity>(powerResults.UltimateOwnerId);
 
             if (health <= 0)
             {
-                Kill(powerUser, KillFlags.None, null);
+                Kill(ultimatePowerUser, KillFlags.None, powerUser);
             }
             else
             {
                 Properties[PropertyEnum.Health] = health;
+                if (powerResults.Flags.HasFlag(PowerResultFlags.Hostile))
+                    OnGotHit(ultimatePowerUser);
             }
 
             return true;
+        }
+
+        public virtual void OnGotHit(WorldEntity attacker)
+        {
+            TriggerEntityActionEvent(EntitySelectorActionEventType.OnGotAttacked);
+            if (attacker != null && attacker.GetMostResponsiblePowerUser<Avatar>() != null)
+                TriggerEntityActionEvent(EntitySelectorActionEventType.OnGotAttackedByPlayer);
         }
 
         public string PowerCollectionToString()
@@ -1454,7 +1484,7 @@ namespace MHServerEmu.Games.Entities
         public override void OnChangePlayerAOI(Player player, InterestTrackOperation operation, AOINetworkPolicyValues newInterestPolicies, AOINetworkPolicyValues previousInterestPolicies, AOINetworkPolicyValues archiveInterestPolicies = AOINetworkPolicyValues.AOIChannelNone)
         {
             base.OnChangePlayerAOI(player, operation, newInterestPolicies, previousInterestPolicies, archiveInterestPolicies);
-            UpdateSimulationState();
+            //UpdateSimulationState();      // We do simulation updates per-cell now
         }
 
         public virtual void OnEnteredWorld(EntitySettings settings)
@@ -1464,6 +1494,9 @@ namespace MHServerEmu.Games.Entities
 
             PowerCollection?.OnOwnerEnteredWorld();
 
+            if (WorldEntityPrototype.DiscoverInRegion)
+                Region.DiscoverEntity(this, false);
+
             UpdateInterestPolicies(true, settings);
 
             UpdateSimulationState();
@@ -1472,6 +1505,28 @@ namespace MHServerEmu.Games.Entities
         public virtual void OnExitedWorld()
         {
             PowerCollection?.OnOwnerExitedWorld();
+
+            // Undiscover from region
+            if (WorldEntityPrototype.DiscoverInRegion)
+                Region.UndiscoverEntity(this, true);
+
+            // Undiscover from players
+            if (InterestReferences.IsAnyPlayerInterested(AOINetworkPolicyValues.AOIChannelDiscovery))
+            {
+                foreach (ulong playerId in InterestReferences.PlayerIds)
+                {
+                    Player player = Game.EntityManager.GetEntity<Player>(playerId);
+
+                    if (player == null)
+                    {
+                        Logger.Warn("OnExitedWorld(): player == null");
+                        continue;
+                    }
+
+                    player.UndiscoverEntity(this, false);   // Skip interest update for undiscover because we are doing an update below anyway
+                }
+            }
+
             UpdateInterestPolicies(false);
 
             UpdateSimulationState();
@@ -1492,6 +1547,10 @@ namespace MHServerEmu.Games.Entities
 
             switch (id.Enum)
             {
+                case PropertyEnum.AllianceOverride:
+                    OnAllianceChanged(newValue);
+                    break;
+
                 case PropertyEnum.CastSpeedDecrPct:
                 case PropertyEnum.CastSpeedIncrPct:
                 case PropertyEnum.CastSpeedMult:
@@ -1548,9 +1607,42 @@ namespace MHServerEmu.Games.Entities
                     Properties[PropertyEnum.HealthMaxOther] = newValue;
                     break;
 
+                case PropertyEnum.MissileBlockingHotspot:
+                    if (IsHotspot)
+                        SetFlag(EntityFlags.IsCollidableHotspot, newValue);
+                    break;
+
                 case PropertyEnum.NoEntityCollide:
-                    SetFlag(EntityFlags.NoCollide, true);
-                    // EnableNavigationInfluence DisableNavigationInfluence
+                    SetFlag(EntityFlags.NoCollide, newValue);
+                    bool canInfluence = CanInfluenceNavigationMesh();
+                    if (canInfluence ^ HasNavigationInfluence)
+                    {
+                        if (canInfluence)
+                            EnableNavigationInfluence();
+                        else
+                            DisableNavigationInfluence();
+                    }
+                    break;
+
+                case PropertyEnum.NoEntityCollideException:
+                    SetFlag(EntityFlags.HasNoCollideException, newValue != InvalidId);
+                    break;
+
+                case PropertyEnum.Intangible:
+                    SetFlag(EntityFlags.Intangible, newValue);
+                    canInfluence = CanInfluenceNavigationMesh();
+                    if (canInfluence ^ HasNavigationInfluence)
+                    {
+                        if (canInfluence)
+                            EnableNavigationInfluence();
+                        else
+                            DisableNavigationInfluence();
+                    }
+                    break;
+
+                case PropertyEnum.SkillshotReflectChancePct:
+                    if (IsHotspot)
+                        SetFlag(EntityFlags.IsReflectingHotspot, newValue);
                     break;
             }
         }
@@ -1614,12 +1706,18 @@ namespace MHServerEmu.Games.Entities
         {
             base.OnPostAOIAddOrRemove(player, operation, newInterestPolicies, previousInterestPolicies);
 
-            // Send our entire power collection when we gain proximity (enter game world)
-            if (previousInterestPolicies != AOINetworkPolicyValues.AOIChannelNone
-                && previousInterestPolicies.HasFlag(AOINetworkPolicyValues.AOIChannelProximity) == false
-                && newInterestPolicies.HasFlag(AOINetworkPolicyValues.AOIChannelProximity))
+            AOINetworkPolicyValues gainedPolicies = newInterestPolicies & ~previousInterestPolicies;
+
+            if (gainedPolicies.HasFlag(AOINetworkPolicyValues.AOIChannelProximity))
             {
-                PowerCollection?.SendEntireCollection(player);
+                // Send our entire power collection when we gain proximity and enter game world on the client
+                // (the client needs to already be aware of us through ownership or some other channel)
+                if (previousInterestPolicies != AOINetworkPolicyValues.AOIChannelNone)
+                    PowerCollection?.SendEntireCollection(player);
+
+                // Mark as discovered by the player if needed
+                if (IsDiscoverable && operation == InterestTrackOperation.Add && WorldEntityPrototype.ObjectiveInfo?.TrackAfterDiscovery == true)
+                    player.DiscoverEntity(this, true);
             }
         }
 

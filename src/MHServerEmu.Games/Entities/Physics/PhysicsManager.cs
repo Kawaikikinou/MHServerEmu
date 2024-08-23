@@ -1,7 +1,9 @@
 ﻿using MHServerEmu.Core.Collisions;
 using MHServerEmu.Core.VectorMath;
+using MHServerEmu.Games.Behavior;
 using MHServerEmu.Games.Common;
 using MHServerEmu.Games.Entities.Locomotion;
+using MHServerEmu.Games.Events;
 using MHServerEmu.Games.Navi;
 using MHServerEmu.Games.Regions;
 
@@ -381,7 +383,7 @@ namespace MHServerEmu.Games.Entities.Physics
 
             Region region = entity.Region;
             if (region != null)
-                resultPosition.Z = Math.Clamp(resultPosition.Z, region.Bound.Min.Z, region.Bound.Max.Z);
+                resultPosition.Z = Math.Clamp(resultPosition.Z, region.Aabb.Min.Z, region.Aabb.Max.Z);
 
             if (clipped && allowSweep)
             {
@@ -543,19 +545,22 @@ namespace MHServerEmu.Games.Entities.Physics
         private static void NotifyEntityCollision(WorldEntity who, WorldEntity whom, Vector3 whoPos)
         {
             who?.OnCollide(whom, whoPos);
-            // TODO EntityCollisionEvent
+            var evt = new EntityCollisionEvent(who, whom);
+            who.CollideEvent.Invoke(evt);
         }
 
         private static void NotifyEntityOverlapBegin(WorldEntity who, WorldEntity whom, Vector3 whoPos, Vector3 whomPos)
         {
             who?.OnOverlapBegin(whom, whoPos, whomPos);
-            // TODO EntityCollisionEvent
+            var evt = new EntityCollisionEvent(who, whom);
+            who.OverlapBeginEvent.Invoke(evt);
         }
 
         private static void NotifyEntityOverlapEnd(WorldEntity who, WorldEntity whom)
         {
             who?.OnOverlapEnd(whom);
-            // TODO EntityCollisionEvent
+            var evt = new EntityCollisionEvent(who, whom);
+            who.OverlapEndEvent.Invoke(evt);
         }
 
         private void UpdateOverlapEntryHelper(EntityPhysics entityPhysics, WorldEntity otherEntity)
