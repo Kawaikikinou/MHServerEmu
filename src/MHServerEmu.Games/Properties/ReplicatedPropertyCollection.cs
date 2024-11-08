@@ -2,6 +2,7 @@
 using Gazillion;
 using MHServerEmu.Core.Extensions;
 using MHServerEmu.Core.Logging;
+using MHServerEmu.Core.Memory;
 using MHServerEmu.Core.Serialization;
 using MHServerEmu.Games.Common;
 using MHServerEmu.Games.Entities;
@@ -46,16 +47,27 @@ namespace MHServerEmu.Games.Properties
             _replicationId = IArchiveMessageDispatcher.InvalidReplicationId;
         }
 
+        public override void ResetForPool()
+        {
+            base.ResetForPool();
+
+            _messageDispatcher = null;
+            _interestPolicies = AOINetworkPolicyValues.AOIChannelNone;
+            _replicationId = IArchiveMessageDispatcher.InvalidReplicationId;
+        }
+
+        public override void Dispose()
+        {
+            // Need to override Dispose so that replicated collections don't get pulled with regular ones
+            ObjectPoolManager.Instance.Return(this);
+        }
+
         public override bool SerializeWithDefault(Archive archive, PropertyCollection defaultCollection)
         {
             bool success = true;
 
-            // ArchiveMessageHandler::Serialize() -> move this to a common helper class?
             if (archive.IsReplication)
-            {
                 success &= Serializer.Transfer(archive, ref _replicationId);
-                // TODO: register message dispatcher
-            }
             
             success &= base.SerializeWithDefault(archive, defaultCollection);
             return success;

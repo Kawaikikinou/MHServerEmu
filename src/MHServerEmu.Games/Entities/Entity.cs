@@ -1,6 +1,7 @@
 ﻿using System.Text;
 using MHServerEmu.Core.Collections;
 using MHServerEmu.Core.Logging;
+using MHServerEmu.Core.Memory;
 using MHServerEmu.Core.Serialization;
 using MHServerEmu.Games.Entities.Avatars;
 using MHServerEmu.Games.Entities.Inventories;
@@ -181,8 +182,8 @@ namespace MHServerEmu.Games.Entities
 
         #region Property Properties (lol)
 
-        public int CharacterLevel { get => Properties[PropertyEnum.CharacterLevel]; set => Properties[PropertyEnum.CharacterLevel] = value; }
-        public int CombatLevel { get => Properties[PropertyEnum.CombatLevel]; set => Properties[PropertyEnum.CombatLevel] = value; }
+        public int CharacterLevel { get => Properties[PropertyEnum.CharacterLevel]; set => SetCharacterLevel(value); }
+        public int CombatLevel { get => Properties[PropertyEnum.CombatLevel]; set => SetCombatLevel(value); }
 
         public ulong PowerUserOverrideId { get => HasPowerUserOverride ? Properties[PropertyEnum.PowerUserOverrideID] : 0; }
         public PrototypeId ClusterPrototype { get => HasClusterPrototype ? Properties[PropertyEnum.ClusterPrototype] : PrototypeId.Invalid; }
@@ -259,12 +260,13 @@ namespace MHServerEmu.Games.Entities
         {
             if (Prototype.EvalOnCreate?.Length > 0)
             {
-                EvalContextData contextData = new(Game);
-                contextData.SetVar_PropertyCollectionPtr(EvalContext.Default, Properties);
+                using EvalContextData evalContext = ObjectPoolManager.Instance.Get<EvalContextData>();
+                evalContext.Game = Game;
+                evalContext.SetVar_PropertyCollectionPtr(EvalContext.Default, Properties);
 
                 foreach (EvalPrototype evalProto in Prototype.EvalOnCreate)
                 {
-                    if (Eval.RunBool(evalProto, contextData) == false)
+                    if (Eval.RunBool(evalProto, evalContext) == false)
                         Logger.Warn($"OnPostInit(): Failed to run eval {evalProto.ExpressionString()}");
                 }
             }
@@ -273,6 +275,11 @@ namespace MHServerEmu.Games.Entities
         public virtual bool Serialize(Archive archive)
         {
             return Properties.SerializeWithDefault(archive, Prototype?.Properties);
+        }
+
+        public virtual void OnUnpackComplete(Archive archive)
+        {
+
         }
 
         public virtual bool ApplyInitialReplicationState(ref EntitySettings settings) => true;
@@ -1088,5 +1095,18 @@ namespace MHServerEmu.Games.Entities
         }
 
         #endregion
+
+        // Note: SetCharacterLevel() and SetCombatLevel() need dedicated functions so that we can differentiate
+        // level being set during initialization and while in-game (e.g. when leveling up)
+
+        protected virtual void SetCharacterLevel(int characterLevel)
+        {
+            Properties[PropertyEnum.CharacterLevel] = characterLevel;
+        }
+
+        protected virtual void SetCombatLevel(int combatLevel)
+        {
+            Properties[PropertyEnum.CombatLevel] = combatLevel;
+        }
     }
 }

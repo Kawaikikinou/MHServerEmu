@@ -1,8 +1,8 @@
 ﻿using System.Collections;
 using Google.ProtocolBuffers;
 using MHServerEmu.Core.Collisions;
-using MHServerEmu.Core.Extensions;
 using MHServerEmu.Core.Logging;
+using MHServerEmu.Core.Memory;
 using MHServerEmu.Core.Serialization;
 using MHServerEmu.Core.VectorMath;
 using MHServerEmu.Games.Common;
@@ -16,10 +16,8 @@ namespace MHServerEmu.Games.Properties
     /// <summary>
     /// An aggregatable collection of key/value pairs of <see cref="PropertyId"/> and <see cref="PropertyValue"/>.
     /// </summary>
-    public class PropertyCollection : IEnumerable<KeyValuePair<PropertyId, PropertyValue>>, ISerialize
+    public class PropertyCollection : IEnumerable<KeyValuePair<PropertyId, PropertyValue>>, ISerialize, IPoolable, IDisposable
     {
-        // TODO: Consider implementing IDisposable for optimization
-
         private static readonly Logger Logger = LogManager.CreateLogger();
 
         private readonly PropertyList _baseList = new();
@@ -128,6 +126,8 @@ namespace MHServerEmu.Games.Properties
         }
 
         #endregion
+
+        public PropertyCollection() { }
 
         // NOTE: In the client GetProperty() and SetProperty() handle conversion to and from PropertyValue,
         // but we take care of that with implicit casting defined in PropertyValue.cs, so these methods are
@@ -324,14 +324,15 @@ namespace MHServerEmu.Games.Properties
             PropertyInfo info = GameDatabase.PropertyInfoTable.LookupPropertyInfo(id.Enum);
             if (info.HasDependentEvals)
             {
-                EvalContextData contextData = new(Game.Current);
-                contextData.SetReadOnlyVar_PropertyCollectionPtr(EvalContext.Default, this);
+                using EvalContextData evalContext = ObjectPoolManager.Instance.Get<EvalContextData>();
+                evalContext.Game = Game.Current;
+                evalContext.SetReadOnlyVar_PropertyCollectionPtr(EvalContext.Default, this);
 
                 foreach (PropertyId dependentEvalId in info.DependentEvals)
                 {
                     PropertyInfo dependentEvalInfo = GameDatabase.PropertyInfoTable.LookupPropertyInfo(dependentEvalId.Enum);
                     PropertyValue oldDependentValue = GetPropertyValue(dependentEvalId);
-                    PropertyValue newDependentValue = EvalPropertyValue(dependentEvalInfo, contextData);
+                    PropertyValue newDependentValue = EvalPropertyValue(dependentEvalInfo, evalContext);
 
                     if (newDependentValue.RawLong != oldDependentValue.RawLong)
                     {
@@ -457,7 +458,7 @@ namespace MHServerEmu.Games.Properties
             // Cache property info lookups for copying multiple properties of the same type in a row
             PropertyEnum previousEnum = PropertyEnum.Invalid;
             PropertyInfo info = null;
-            foreach (var kvp in childCollection)
+            foreach (var kvp in childCollection.IteratePropertyRange(PropertyEnumFilter.Agg))
             {
                 PropertyId propertyId = kvp.Key;
                 PropertyEnum propertyEnum = propertyId.Enum;
@@ -602,12 +603,22 @@ namespace MHServerEmu.Games.Properties
         /// This can be potentially slow because our current implementation does not group key/value pairs by enum, so this filter is executed
         /// on every key/value pair rather than once per enum.
         /// </remarks>
-        public IEnumerable<KeyValuePair<PropertyId, PropertyValue>> IteratePropertyRange(PropertyList.PropertyEnumFilter filter)
+        public IEnumerable<KeyValuePair<PropertyId, PropertyValue>> IteratePropertyRange(PropertyEnumFilter.Func filterFunc)
         {
-            return _aggregateList.IteratePropertyRange(filter);
+            return _aggregateList.IteratePropertyRange(filterFunc);
         }
 
         #endregion
+
+        public virtual void ResetForPool()
+        {
+            Clear();
+        }
+
+        public virtual void Dispose()
+        {
+            ObjectPoolManager.Instance.Return(this);
+        }
 
         public virtual bool Serialize(Archive archive)
         {
@@ -638,21 +649,55 @@ namespace MHServerEmu.Games.Properties
             }
             else
             {
+                SetPropertyFlags flags = SetPropertyFlags.Deserialized;
+                if (archive.IsPersistent)
+                    flags |= SetPropertyFlags.Persistent;
+
                 uint numProperties = 0;
                 success &= archive.ReadUnencodedStream(ref numProperties);
 
                 for (uint i = 0; i < numProperties; i++)
                 {
                     PropertyId id = new();
-                    success &= Serializer.Transfer(archive, ref id);
+                    PropertyValue value = new();
+                    bool isValid = false;
 
-                    PropertyInfo info = GameDatabase.PropertyInfoTable.LookupPropertyInfo(id.Enum);
+                    if (archive.IsPersistent)
+                    {
+                        // TODO: Deprecated property handling
+                        PropertyStore propertyStore = new();
+                        success &= propertyStore.Serialize(ref id, ref value, this, archive);
+                        if (success)
+                            isValid = success;
+                    }
+                    else
+                    {
+                        success &= Serializer.Transfer(archive, ref id);
 
-                    ulong bits = 0;
-                    success &= Serializer.Transfer(archive, ref bits);
+                        PropertyInfo info = GameDatabase.PropertyInfoTable.LookupPropertyInfo(id.Enum);
 
-                    if (success)
-                        SetPropertyValue(id, ConvertBitsToValue(bits, info.DataType));
+                        if (archive.IsMigration)
+                        {
+                            // Migration archives serialize all values as int64
+                            // This is also true for replication in older versions of the game (e.g. 1.10)
+                            success &= Serializer.Transfer(archive, ref value.RawLong);
+                            isValid = true;
+                        }
+                        else
+                        {
+                            ulong bits = 0;
+                            success &= Serializer.Transfer(archive, ref bits);
+
+                            if (success)
+                            {
+                                value = ConvertBitsToValue(bits, info.DataType);
+                                isValid = true;
+                            }
+                        }
+                    }
+
+                    if (isValid)
+                        SetPropertyValue(id, value, flags);
                 }
             }
 
@@ -712,10 +757,10 @@ namespace MHServerEmu.Games.Properties
             // First try running eval
             if (info.IsEvalProperty && info.IsEvalAlwaysCalculated)
             {
-                EvalContextData contextData = new();
-                contextData.SetReadOnlyVar_PropertyCollectionPtr(EvalContext.Default, this);
-                contextData.SetReadOnlyVar_PropertyId(EvalContext.Var1, id);
-                return EvalPropertyValue(info, contextData);
+                using EvalContextData evalContext = ObjectPoolManager.Instance.Get<EvalContextData>();
+                evalContext.SetReadOnlyVar_PropertyCollectionPtr(EvalContext.Default, this);
+                evalContext.SetReadOnlyVar_PropertyId(EvalContext.Var1, id);
+                return EvalPropertyValue(info, evalContext);
             }
 
             // Fall back to the default value if no value is specified in the aggregate list
@@ -758,19 +803,28 @@ namespace MHServerEmu.Games.Properties
             return hasChanged || flags.HasFlag(SetPropertyFlags.Refresh);  // Some kind of flag that forces property value update
         }
 
-        protected static bool SerializePropertyForPacking(KeyValuePair<PropertyId, PropertyValue> kvp, ref uint numProperties, Archive archive, PropertyCollection defaultCollection)
+        protected bool SerializePropertyForPacking(KeyValuePair<PropertyId, PropertyValue> kvp, ref uint numProperties, Archive archive, PropertyCollection defaultCollection)
         {
             bool success = true;
 
             PropertyInfo info = GameDatabase.PropertyInfoTable.LookupPropertyInfo(kvp.Key.Enum);
+            PropertyInfoPrototype infoProto = info.Prototype;
 
-            // TODO: Filter properties for persistent archives
-
-            // Filter properties for replication
-            if (archive.IsReplication)
+            // Filter out properties based on archive serialization mode
+            if (archive.IsPersistent)       
+            {
+                if (infoProto.ReplicateToDatabase == DatabasePolicy.None || info.IsCurveProperty)
+                    return true;
+            }
+            else if (archive.IsMigration)
+            {
+                if (infoProto.ReplicateForTransfer == false)
+                    return true;
+            }
+            else if (archive.IsReplication)
             {
                 // Skip properties that don't match AOI channels for this archive
-                if ((info.Prototype.RepNetwork & archive.GetReplicationPolicyEnum()) == Network.AOINetworkPolicyValues.AOIChannelNone)
+                if ((infoProto.RepNetwork & archive.GetReplicationPolicyEnum()) == Network.AOINetworkPolicyValues.AOIChannelNone)
                     return true;
 
                 // Skip properties that have the same value as the provided default collection (if there is one)
@@ -779,14 +833,32 @@ namespace MHServerEmu.Games.Properties
             }
 
             // Serialize
+            PropertyId id = kvp.Key;
+            PropertyValue value = kvp.Value;
 
-            // Id is reversed so that it can be efficiently encoded into varint when all params are 0
-            // NOTE: Here we reverse bytes, but when we serialize individual properties for replication we reserve bits
-            // (see ReplicatedPropertyCollection.MarkPropertyChanged()).
-            ulong id = kvp.Key.Raw.ReverseBytes();
-            ulong value = ConvertValueToBits(kvp.Value, info.DataType);
-            success &= Serializer.Transfer(archive, ref id);
-            success &= Serializer.Transfer(archive, ref value);
+            if (archive.IsPersistent)
+            {
+                PropertyStore propertyStore = new();
+                success &= propertyStore.Serialize(ref id, ref value, this, archive);
+
+                //Logger.Debug($"SerializePropertyForPacking(): Packed {id} for persistent storage");
+            }
+            else
+            {
+                success &= Serializer.Transfer(archive, ref id);
+
+                if (archive.IsMigration)
+                {
+                    // Migration archives serialize all values as int64
+                    // This is also true for replication in older versions of the game (e.g. 1.10)
+                    success &= Serializer.Transfer(archive, ref value.RawLong);
+                }
+                else
+                {
+                    ulong valueBits = ConvertValueToBits(kvp.Value, info.DataType);
+                    success &= Serializer.Transfer(archive, ref valueBits);
+                }
+            }
 
             numProperties++;        // Increment the number of properties that will be written when we finish iterating
 
@@ -913,7 +985,7 @@ namespace MHServerEmu.Games.Properties
             PropertyEnum previousEnum = PropertyEnum.Invalid;
             PropertyInfo info = null;
 
-            foreach (var kvp in childCollection)
+            foreach (var kvp in childCollection.IteratePropertyRange(PropertyEnumFilter.Agg))
             {
                 PropertyId propertyId = kvp.Key;
                 PropertyEnum propertyEnum = propertyId.Enum;

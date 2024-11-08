@@ -6,6 +6,7 @@ using MHServerEmu.Core.Config;
 using MHServerEmu.Core.Extensions;
 using MHServerEmu.Core.Helpers;
 using MHServerEmu.Core.Logging;
+using MHServerEmu.Core.Memory;
 using MHServerEmu.Core.Network;
 using MHServerEmu.Core.System.Random;
 using MHServerEmu.Core.System.Time;
@@ -386,7 +387,7 @@ namespace MHServerEmu.Games
             if (Directory.Exists(crashReportDir) == false)
                 Directory.CreateDirectory(crashReportDir);
 
-            string crashReportFilePath = Path.Combine(crashReportDir, $"GameInstanceCrash_{now:yyyy-dd-MM_HH.mm.ss}.txt");
+            string crashReportFilePath = Path.Combine(crashReportDir, $"GameInstanceCrash_{now.ToString(FileHelper.FileNameDateFormat)}.txt");
 
             using (StreamWriter writer = new(crashReportFilePath))
             {
@@ -402,7 +403,9 @@ namespace MHServerEmu.Games
                     writer.WriteLine(region.ToString());
                 writer.WriteLine();
 
-                writer.WriteLine($"Exception:\n{exception}");
+                writer.WriteLine($"Exception:\n{exception}\n");
+
+                writer.WriteLine($"Server Status:\n{ServerManager.Instance.GetServerStatus()}\n");
             }
 
             Logger.ErrorException(exception, $"Game instance crashed, report saved to {crashReportFilePath}");

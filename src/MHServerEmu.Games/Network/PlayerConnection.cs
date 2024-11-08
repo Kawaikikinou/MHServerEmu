@@ -1,6 +1,8 @@
 ﻿using Gazillion;
 using Google.ProtocolBuffers;
+using MHServerEmu.Core.Extensions;
 using MHServerEmu.Core.Logging;
+using MHServerEmu.Core.Memory;
 using MHServerEmu.Core.Network;
 using MHServerEmu.Core.Serialization;
 using MHServerEmu.Core.VectorMath;
@@ -13,7 +15,7 @@ using MHServerEmu.Games.Entities.Avatars;
 using MHServerEmu.Games.Entities.Inventories;
 using MHServerEmu.Games.Entities.Items;
 using MHServerEmu.Games.Entities.Locomotion;
-using MHServerEmu.Games.Entities.Options;
+using MHServerEmu.Games.Entities.Persistence;
 using MHServerEmu.Games.Events;
 using MHServerEmu.Games.Events.LegacyImplementations;
 using MHServerEmu.Games.GameData;
@@ -52,7 +54,7 @@ namespace MHServerEmu.Games.Network
 
         public Player Player { get; private set; }
 
-        public ulong PlayerDbId { get => _dbAccount.Id; }
+        public ulong PlayerDbId { get => (ulong)_dbAccount.Id; }
 
         /// <summary>
         /// Constructs a new <see cref="PlayerConnection"/>.
@@ -89,79 +91,133 @@ namespace MHServerEmu.Games.Network
         #region Data Management
 
         /// <summary>
-        /// Updates the <see cref="DBAccount"/> instance bound to this <see cref="PlayerConnection"/>.
-        /// </summary>
-        public void UpdateDBAccount()
-        {
-            _dbAccount.Player.RawRegion = (long)TransferParams.DestTargetRegionProtoRef;    // Sometimes connection target region is overriden (e.g. banded regions)
-            _dbAccount.Player.RawWaypoint = (long)TransferParams.DestTargetProtoRef;
-            _dbAccount.Player.AOIVolume = (int)AOI.AOIVolume;
-
-            Player.SaveToDBAccount(_dbAccount);
-            Logger.Trace($"Updated DBAccount {_dbAccount}");
-        }
-
-        /// <summary>
         /// Initializes this <see cref="PlayerConnection"/> from the bound <see cref="DBAccount"/>.
         /// </summary>
-        private void InitializeFromDBAccount()
+        private bool InitializeFromDBAccount()
         {
             DataDirectory dataDirectory = GameDatabase.DataDirectory;
 
             // Initialize transfer params
             // FIXME: RawWaypoint should be either a region connection target or a waypoint proto ref that we get our connection target from
             // We should get rid of saving waypoint refs and just use connection targets.
-            TransferParams.SetTarget((PrototypeId)_dbAccount.Player.RawWaypoint, (PrototypeId)_dbAccount.Player.RawRegion);
+            TransferParams.SetTarget((PrototypeId)_dbAccount.Player.StartTarget, (PrototypeId)_dbAccount.Player.StartTargetRegionOverride);
 
             // Initialize AOI
             AOI.AOIVolume = _dbAccount.Player.AOIVolume;
 
             // Create player entity
-            EntitySettings playerSettings = new();
-            playerSettings.DbGuid = _dbAccount.Id;
-            playerSettings.EntityRef = GameDatabase.GlobalsPrototype.DefaultPlayer;
-            playerSettings.OptionFlags = EntitySettingsOptionFlags.PopulateInventories;
-            playerSettings.PlayerConnection = this;
-
-            Player = (Player)Game.EntityManager.CreateEntity(playerSettings);
-            Player.LoadFromDBAccount(_dbAccount);
-
-            // Make sure we have a valid current avatar ref
-            var lastCurrentAvatarRef = (PrototypeId)_dbAccount.CurrentAvatar.RawPrototype;
-            if (dataDirectory.PrototypeIsA<AvatarPrototype>(lastCurrentAvatarRef) == false)
+            using (EntitySettings playerSettings = ObjectPoolManager.Instance.Get<EntitySettings>())
             {
-                lastCurrentAvatarRef = GameDatabase.GlobalsPrototype.DefaultStartingAvatarPrototype;
-                Logger.Warn($"PlayerConnection(): Invalid avatar data ref specified in DBAccount, defaulting to {GameDatabase.GetPrototypeName(lastCurrentAvatarRef)}");
+                playerSettings.DbGuid = (ulong)_dbAccount.Id;
+                playerSettings.EntityRef = GameDatabase.GlobalsPrototype.DefaultPlayer;
+                playerSettings.OptionFlags = EntitySettingsOptionFlags.PopulateInventories;
+                playerSettings.PlayerConnection = this;
+                playerSettings.PlayerName = _dbAccount.PlayerName;
+                playerSettings.ArchiveSerializeType = ArchiveSerializeType.Database;
+                playerSettings.ArchiveData = _dbAccount.Player.ArchiveData;
+
+                Player = Game.EntityManager.CreateEntity(playerSettings) as Player;
             }
 
-            // Create avatars
-            Inventory avatarLibrary = Player.GetInventory(InventoryConvenienceLabel.AvatarLibrary);
-            Inventory avatarInPlay = Player.GetInventory(InventoryConvenienceLabel.AvatarInPlay);
-            foreach (PrototypeId avatarRef in dataDirectory.IteratePrototypesInHierarchy<AvatarPrototype>(PrototypeIterateFlags.NoAbstractApprovedOnly))
+            // Crash the instance if we fail to create a player entity. This happens when there is collision
+            // in dbid caused by the game instance lagging and being unable to process players leaving before
+            // they log back in again.
+            //
+            // This should always be caught by the player connection manager beforehand, so if it got this far,
+            // something must have gone terribly terribly wrong, and we need to bail out.
+            if (Player == null)
+                throw new($"InitializeFromDBAccount(): Failed to create player entity for {_dbAccount}");
+
+            // Add all badges to admin accounts
+            if (_dbAccount.UserLevel == AccountUserLevel.Admin)
             {
-                if (avatarRef == (PrototypeId)6044485448390219466) continue;   //zzzBrevikOLD.prototype
-
-                EntitySettings avatarSettings = new();
-                avatarSettings.EntityRef = avatarRef;
-                avatarSettings.InventoryLocation = new(Player.Id, avatarRef == lastCurrentAvatarRef ? avatarInPlay.PrototypeDataRef : avatarLibrary.PrototypeDataRef);
-                avatarSettings.DBAccount = _dbAccount;
-
-                Game.EntityManager.CreateEntity(avatarSettings);
+                for (var badge = AvailableBadges.CanGrantBadges; badge < AvailableBadges.NumberOfBadges; badge++)
+                    Player.AddBadge(badge);
             }
 
-            // Create team-up entities
+            // REMOVEME: Set default mission tracker filters for new players
+            // Remove this when we merge missions
+            if (_dbAccount.Player.ArchiveData.IsNullOrEmpty())
+            {
+                foreach (PrototypeId missionFilterTrackerProtoRef in
+                    DataDirectory.Instance.IteratePrototypesInHierarchy<MissionTrackerFilterPrototype>(PrototypeIterateFlags.NoAbstractApprovedOnly))
+                {
+                    var missionFilterTrackerProto = missionFilterTrackerProtoRef.As<MissionTrackerFilterPrototype>();
+                    if (missionFilterTrackerProto.DisplayByDefault)
+                        Player.Properties[PropertyEnum.MissionTrackerFilter, missionFilterTrackerProtoRef] = true;
+                }
+
+                Logger.Trace($"Initialized default mission filters for {Player}");
+            }
+
+            PersistenceHelper.RestoreInventoryEntities(Player, _dbAccount);
+
+            if (Player.CurrentAvatar == null)
+            {
+                // If we don't have an avatar after loading from the database it means this is a new player that we need to create avatars for
+                Inventory avatarLibrary = Player.GetInventory(InventoryConvenienceLabel.AvatarLibrary);
+                Inventory avatarInPlay = Player.GetInventory(InventoryConvenienceLabel.AvatarInPlay);
+
+                PrototypeId defaultAvatarProtoRef = GameDatabase.GlobalsPrototype.DefaultStartingAvatarPrototype;
+
+                foreach (PrototypeId avatarRef in dataDirectory.IteratePrototypesInHierarchy<AvatarPrototype>(PrototypeIterateFlags.NoAbstractApprovedOnly))
+                {
+                    if (avatarRef == (PrototypeId)6044485448390219466) continue;   //zzzBrevikOLD.prototype
+
+                    using EntitySettings avatarSettings = ObjectPoolManager.Instance.Get<EntitySettings>();
+                    avatarSettings.EntityRef = avatarRef;
+                    avatarSettings.InventoryLocation = new(Player.Id, avatarRef == defaultAvatarProtoRef ? avatarInPlay.PrototypeDataRef : avatarLibrary.PrototypeDataRef);
+
+                    Avatar avatar = Game.EntityManager.CreateEntity(avatarSettings) as Avatar;
+                    avatar?.InitializeLevel(1);
+                }
+            }
+
+            Player.SetAvatarLibraryProperties();
+
+            // Create team-up entities if there are none
+            // REMOVEME: Let players buy team-ups from the store instead
             if (Game.GameOptions.TeamUpSystemEnabled)
             {
                 Inventory teamUpLibrary = Player.GetInventory(InventoryConvenienceLabel.TeamUpLibrary);
-                foreach (PrototypeId teamUpRef in dataDirectory.IteratePrototypesInHierarchy<AgentTeamUpPrototype>(PrototypeIterateFlags.NoAbstractApprovedOnly))
+                if (teamUpLibrary.Count == 0)
                 {
-                    EntitySettings teamUpSettings = new();
-                    teamUpSettings.EntityRef = teamUpRef;
-                    teamUpSettings.InventoryLocation = new(Player.Id, teamUpLibrary.PrototypeDataRef);
+                    foreach (PrototypeId teamUpRef in dataDirectory.IteratePrototypesInHierarchy<AgentTeamUpPrototype>(PrototypeIterateFlags.NoAbstractApprovedOnly))
+                    {
+                        using EntitySettings teamUpSettings = ObjectPoolManager.Instance.Get<EntitySettings>();
+                        teamUpSettings.EntityRef = teamUpRef;
+                        teamUpSettings.InventoryLocation = new(Player.Id, teamUpLibrary.PrototypeDataRef);
 
-                    Game.EntityManager.CreateEntity(teamUpSettings);
+                        Agent teamUpAgent = Game.EntityManager.CreateEntity(teamUpSettings) as Agent;
+                        teamUpAgent?.InitializeLevel(1);
+                    }
                 }
             }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Updates the <see cref="DBAccount"/> instance bound to this <see cref="PlayerConnection"/>.
+        /// </summary>
+        private bool UpdateDBAccount()
+        {
+            if (Player == null) return Logger.WarnReturn(false, "UpdateDBAccount(): Player == null");
+
+            using (Archive archive = new(ArchiveSerializeType.Database))
+            {
+                Player.Serialize(archive);
+                _dbAccount.Player.ArchiveData = archive.AccessAutoBuffer().ToArray();
+            }
+
+            _dbAccount.Player.StartTarget = (long)TransferParams.DestTargetProtoRef;
+            _dbAccount.Player.StartTargetRegionOverride = (long)TransferParams.DestTargetRegionProtoRef;    // Sometimes connection target region is overriden (e.g. banded regions)
+            _dbAccount.Player.AOIVolume = (int)AOI.AOIVolume;
+
+            PersistenceHelper.StoreInventoryEntities(Player, _dbAccount);
+
+            Logger.Trace($"Updated DBAccount {_dbAccount}");
+            return true;
         }
 
         #endregion
@@ -286,16 +342,21 @@ namespace MHServerEmu.Games.Network
 
         public void ExitGame()
         {
-            // We need to recreate the player entity when we transfer between regions
-            // because client UI breaks for some reason when we reuse the same player entity id
-            // (e.g. inventory grid stops updating).
+            // We need to recreate the player entity when we transfer between regions because client UI breaks
+            // when we reuse the same player entity id (e.g. inventory grid stops updating).
+            
+            // Player entity exiting the game removes it from its AOI and also removes the current avatar from the world.
+            Player.ExitGame();
+
+            // We need to save data after we exit the game to include data that gets
+            // saved when the current avatar exits world (e.g. mission progress).
             UpdateDBAccount();
 
-            // We need to exit before we destroy so that the player entity can be removed from its AOI
-            Player.ExitGame();
+            // Destroy
             Player.Destroy();
             Game.EntityManager.ProcessDeferredLists();
 
+            // Recreate player
             InitializeFromDBAccount();
         }
 
@@ -343,6 +404,7 @@ namespace MHServerEmu.Games.Network
                 case ClientToGameServerMessage.NetMessageUseInteractableObject:             OnUseInteractableObject(message); break;            // 38
                 case ClientToGameServerMessage.NetMessageUseWaypoint:                       OnUseWaypoint(message); break;                      // 40
                 case ClientToGameServerMessage.NetMessageSwitchAvatar:                      OnSwitchAvatar(message); break;                     // 42
+                case ClientToGameServerMessage.NetMessageChangeDifficulty:                  OnChangeDifficulty(message); break;                 // 43
                 case ClientToGameServerMessage.NetMessageAbilitySlotToAbilityBar:           OnAbilitySlotToAbilityBar(message); break;          // 46
                 case ClientToGameServerMessage.NetMessageAbilityUnslotFromAbilityBar:       OnAbilityUnslotFromAbilityBar(message); break;      // 47
                 case ClientToGameServerMessage.NetMessageAbilitySwapInAbilityBar:           OnAbilitySwapInAbilityBar(message); break;          // 48
@@ -351,7 +413,10 @@ namespace MHServerEmu.Games.Network
                 case ClientToGameServerMessage.NetMessageNotifyLoadingScreenFinished:       OnNotifyLoadingScreenFinished(message); break;      // 86
                 case ClientToGameServerMessage.NetMessagePlayKismetSeqDone:                 OnPlayKismetSeqDone(message); break;                // 96
                 case ClientToGameServerMessage.NetMessageGracefulDisconnect:                OnGracefulDisconnect(message); break;               // 98
+                case ClientToGameServerMessage.NetMessageVendorRequestSellItemTo:           OnVendorRequestSellItemTo(message); break;          // 103
+                case ClientToGameServerMessage.NetMessageSetTipSeen:                        OnSetTipSeen(message); break;                       // 110
                 case ClientToGameServerMessage.NetMessageSetPlayerGameplayOptions:          OnSetPlayerGameplayOptions(message); break;         // 113
+                case ClientToGameServerMessage.NetMessageSelectAvatarSynergies:             OnSelectAvatarSynergies(message); break;            // 116
                 case ClientToGameServerMessage.NetMessageRequestInterestInInventory:        OnRequestInterestInInventory(message); break;       // 121
                 case ClientToGameServerMessage.NetMessageRequestInterestInAvatarEquipment:  OnRequestInterestInAvatarEquipment(message); break; // 123
                 case ClientToGameServerMessage.NetMessageRequestInterestInTeamUpEquipment:  OnRequestInterestInTeamUpEquipment(message); break; // 124
@@ -360,6 +425,8 @@ namespace MHServerEmu.Games.Network
                 case ClientToGameServerMessage.NetMessageOmegaBonusAllocationCommit:        OnOmegaBonusAllocationCommit(message); break;       // 132
                 case ClientToGameServerMessage.NetMessageAssignStolenPower:                 OnAssignStolenPower(message); break;                // 139
                 case ClientToGameServerMessage.NetMessageChangeCameraSettings:              OnChangeCameraSettings(message); break;             // 148
+                case ClientToGameServerMessage.NetMessageStashTabInsert:                    OnStashTabInsert(message); break;                   // 155
+                case ClientToGameServerMessage.NetMessageStashTabOptions:                   OnStashTabOptions(message); break;                  // 156
 
                 // Grouping Manager
                 case ClientToGameServerMessage.NetMessageChat:                                                                                  // 64
@@ -805,12 +872,28 @@ namespace MHServerEmu.Games.Network
             var switchAvatar = message.As<NetMessageSwitchAvatar>();
             if (switchAvatar == null) return Logger.WarnReturn(false, $"OnSwitchAvatar(): Failed to retrieve message");
 
-            Logger.Info($"Received NetMessageSwitchAvatar");
-            Logger.Trace(switchAvatar.ToString());
+            PrototypeId avatarProtoRef = (PrototypeId)switchAvatar.AvatarPrototypeId;
+            Logger.Info($"OnSwitchAvatar(): player=[{this}], avatarProtoRef=[{avatarProtoRef.GetName()}]");
 
             // Start the avatar switching process
             if (Player.BeginSwitchAvatar((PrototypeId)switchAvatar.AvatarPrototypeId) == false)
                 return Logger.WarnReturn(false, "OnSwitchAvatar(): Failed to begin avatar switch");
+
+            return true;
+        }
+
+        private bool OnChangeDifficulty(MailboxMessage message) // 43
+        {
+            var changeDifficulty = message.As<NetMessageChangeDifficulty>();
+            if (changeDifficulty == null) return Logger.WarnReturn(false, $"OnChangeDifficulty(): Failed to retrieve message");
+
+            PrototypeId difficultyTierProtoRef = (PrototypeId)changeDifficulty.DifficultyTierProtoId;
+
+            if (Player.CanChangeDifficulty(difficultyTierProtoRef) == false)
+                return Logger.WarnReturn(false, $"{this} is trying to change difficulty to {difficultyTierProtoRef}, which is not allowed");
+
+            Logger.Trace($"OnChangeDifficulty(): Setting preferred difficulty for {Player.CurrentAvatar} to {difficultyTierProtoRef.GetName()}");
+            Player.CurrentAvatar.Properties[PropertyEnum.DifficultyTierPreference] = difficultyTierProtoRef;
 
             return true;
         }
@@ -929,13 +1012,86 @@ namespace MHServerEmu.Games.Network
             return true;
         }
 
+        private bool OnVendorRequestSellItemTo(MailboxMessage message)  // 103
+        {
+            var vendorRequestSellItemTo = message.As<NetMessageVendorRequestSellItemTo>();
+            if (vendorRequestSellItemTo == null) return Logger.WarnReturn(false, $"OnVendorRequestSellItemTo(): Failed to retrieve message");
+
+            Item item = Game.EntityManager.GetEntity<Item>(vendorRequestSellItemTo.ItemId);
+            if (item == null) return false;     // Multiple request may arrive due to lag
+
+            if (item.GetOwnerOfType<Player>() != Player)
+                return Logger.WarnReturn(false, $"OnVendorRequestSellItemTo(): {this} is attempting to sell item {item} that does not belong to it!");
+
+            // TODO: Sell this item to the specified vendor with the ability to buy back
+            PrototypeId creditsProtoRef = GameDatabase.CurrencyGlobalsPrototype.Credits;
+            Player.Properties[PropertyEnum.Currency, creditsProtoRef] += item.GetSellPrice(Player);
+            item.Destroy();
+
+            return true;
+        }
+
+        private bool OnSetTipSeen(MailboxMessage message)   // 110
+        {
+            var setTipSeen = message.As<NetMessageSetTipSeen>();
+            if (setTipSeen == null) return Logger.WarnReturn(false, $"OnSetTipSeen(): Failed to retrieve message");
+
+            PrototypeId tipProtoRef = (PrototypeId)setTipSeen.TipDataRefId;
+            if (DataDirectory.Instance.PrototypeIsA<HUDTutorialPrototype>(tipProtoRef) == false)
+                return Logger.WarnReturn(false, $"OnSetTipSeen(): {tipProtoRef} is not a valid tip prototype ref");
+
+            Player.Properties[PropertyEnum.TutorialHasSeenTip, tipProtoRef] = true;
+            Logger.Trace($"OnSetTipSeen(): 0x{Player.DatabaseUniqueId:X} => {tipProtoRef.GetName()}");
+
+            return true;
+        }
+
         private bool OnSetPlayerGameplayOptions(MailboxMessage message) // 113
         {
             var setPlayerGameplayOptions = message.As<NetMessageSetPlayerGameplayOptions>();
             if (setPlayerGameplayOptions == null) return Logger.WarnReturn(false, $"OnSetPlayerGameplayOptions(): Failed to retrieve message");
 
-            Logger.Info($"Received SetPlayerGameplayOptions message");
-            Logger.Trace(new GameplayOptions(setPlayerGameplayOptions.OptionsData).ToString());
+            Player.SetGameplayOptions(setPlayerGameplayOptions);
+            return true;
+        }
+
+        private bool OnSelectAvatarSynergies(MailboxMessage message)    // 116
+        {
+            var selectAvatarSynergies = message.As<NetMessageSelectAvatarSynergies>();
+            if (selectAvatarSynergies == null) return Logger.WarnReturn(false, $"OnSelectAvatarSynergies(): Failed to retrieve message");
+
+            Avatar avatar = Game.EntityManager.GetEntity<Avatar>(selectAvatarSynergies.AvatarId);
+            if (avatar == null) return Logger.WarnReturn(false, "OnSelectAvatarSynergies(): avatar == null");
+
+            // Validate ownership
+            Player owner = avatar.GetOwnerOfType<Player>();
+            if (owner != Player)
+                return Logger.WarnReturn(false, $"OnSelectAvatarSynergies(): {this} is attempting to set synergies of avatar {avatar} that does not belong to it!");
+
+            avatar.Properties.RemovePropertyRange(PropertyEnum.AvatarSynergySelected);
+
+            foreach (ulong avatarProtoId in selectAvatarSynergies.AvatarPrototypesList)
+            {
+                PrototypeId avatarProtoRef = (PrototypeId)avatarProtoId;
+                AvatarPrototype avatarProto = avatarProtoRef.As<AvatarPrototype>();
+
+                if (avatarProto == null)
+                {
+                    Logger.Warn("OnSelectAvatarSynergies(): avatarProto == null");
+                    continue;
+                }
+
+                // TODO: Get level from prototypes and take prestige into account
+                Avatar synergyAvatar = owner.GetAvatar(avatarProtoRef);
+                if (synergyAvatar.CharacterLevel < 25)
+                {
+                    Logger.Warn("OnSelectAvatarSynergies(): Attempting to set locked synergy");
+                    continue;
+                }
+
+                avatar.Properties[PropertyEnum.AvatarSynergySelected, avatarProtoRef] = true;
+            }
+
             return true;
         }
 
@@ -1045,6 +1201,22 @@ namespace MHServerEmu.Games.Network
 
             AOI.InitializePlayerView((PrototypeId)changeCameraSettings.CameraSettings);
             return true;
+        }
+
+        private bool OnStashTabInsert(MailboxMessage message)  // 155
+        {
+            var stashTabInsert = message.As<NetMessageStashTabInsert>();
+            if (stashTabInsert == null) return Logger.WarnReturn(false, $"OnStashTabInsert(): Failed to retrieve message");
+
+            return Player.StashTabInsert((PrototypeId)stashTabInsert.InvId, (int)stashTabInsert.InsertIndex);
+        }
+
+        private bool OnStashTabOptions(MailboxMessage message)  // 156
+        {
+            var stashTabOptions = message.As<NetMessageStashTabOptions>();
+            if (stashTabOptions == null) return Logger.WarnReturn(false, $"OnStashTabOptions(): Failed to retrieve message");
+
+            return Player.UpdateStashTabOptions(stashTabOptions);
         }
 
         #endregion

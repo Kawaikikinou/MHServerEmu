@@ -8,6 +8,8 @@ using MHServerEmu.Core.Logging;
 using MHServerEmu.Core.Logging.Targets;
 using MHServerEmu.Core.Network;
 using MHServerEmu.DatabaseAccess;
+using MHServerEmu.DatabaseAccess.Json;
+using MHServerEmu.DatabaseAccess.SQLite;
 using MHServerEmu.Frontend;
 using MHServerEmu.Games.GameData;
 using MHServerEmu.Games.GameData.LiveTuning;
@@ -143,13 +145,14 @@ namespace MHServerEmu
                 if (Directory.Exists(crashReportDir) == false)
                     Directory.CreateDirectory(crashReportDir);
 
-                string crashReportFilePath = Path.Combine(crashReportDir, $"ServerCrash_{now:yyyy-dd-MM_HH.mm.ss}.txt");
+                string crashReportFilePath = Path.Combine(crashReportDir, $"ServerCrash_{now.ToString(FileHelper.FileNameDateFormat)}.txt");
 
                 using (StreamWriter writer = new(crashReportFilePath))
                 {
                     writer.WriteLine($"{VersionInfo}\n");
                     writer.WriteLine($"Local Server Time: {now:yyyy.MM.dd HH:mm:ss.fff}\n");
-                    writer.WriteLine($"Exception:\n{exception}");
+                    writer.WriteLine($"Exception:\n{exception}\n");
+                    writer.WriteLine($"Server Status:\n{ServerManager.Instance.GetServerStatus()}\n");
                 }
 
                 Logger.FatalException(exception, $"MHServerEmu terminating because of unhandled exception, report saved to {crashReportFilePath}");
@@ -183,7 +186,7 @@ namespace MHServerEmu
             if (config.EnableFile)
             {
                 FileTarget target = new(config.FileIncludeTimestamps, config.FileMinLevel, config.FileMaxLevel,
-                    $"MHServerEmu_{StartupTime:yyyy-dd-MM_HH.mm.ss}.log", false);
+                    $"MHServerEmu_{StartupTime.ToString(FileHelper.FileNameDateFormat)}.log", false);
                 LogManager.AttachTarget(target);
             }
 
@@ -196,11 +199,15 @@ namespace MHServerEmu
         /// </summary>
         private bool InitSystems()
         {
+            // JsonDBManager saves a single account in a JSON file
+            var config = ConfigManager.Instance.GetConfig<PlayerManagerConfig>();
+            IDBManager dbManager = config.UseJsonDBManager ? JsonDBManager.Instance : SQLiteDBManager.Instance;
+
             return PakFileSystem.Instance.Initialize()
                 && ProtocolDispatchTable.Instance.Initialize()
                 && GameDatabase.IsInitialized
                 && LiveTuningManager.Instance.Initialize()
-                && AccountManager.Initialize(SQLiteDBManager.Instance);     // TODO: Multiple IDBManager implementations
+                && AccountManager.Initialize(dbManager);
         }
     }
 }

@@ -2,6 +2,7 @@
 using MHServerEmu.Core.Extensions;
 using MHServerEmu.Core.Helpers;
 using MHServerEmu.Core.Logging;
+using MHServerEmu.Core.Memory;
 using MHServerEmu.Games.Entities;
 using MHServerEmu.Games.Entities.Avatars;
 using MHServerEmu.Games.Entities.Inventories;
@@ -991,6 +992,26 @@ namespace MHServerEmu.Games.Properties.Evals
             return true;
         }
 
+        public static AssetId RunAssetId(EvalPrototype evalProto, EvalContextData data)
+        {
+            Run(evalProto, data, out AssetId retVal);
+            return retVal;
+        }
+
+        public static bool Run(EvalPrototype evalProto, EvalContextData data, out AssetId resultVal)
+        {
+            EvalVar evalVar = Run(evalProto, data);
+            if (FromValue(evalVar, out resultVal) == false)
+            {
+                Logger.Warn($"Invalid return type [{evalVar.Type}]");
+                if (evalProto != null)
+                    Logger.Warn($"for operator [{evalProto.Op}] EvalPrototype=[{evalProto.GetType().Name}] ExpressionString=[{evalProto.ExpressionString()}] Path=[{evalProto}]");
+                return false;
+            }
+
+            return true;
+        }
+
         public static bool FromValue(EvalVar evalVar, out int resultVal)
         {
             switch (evalVar.Type)
@@ -1734,7 +1755,7 @@ namespace MHServerEmu.Games.Properties.Evals
             var dataCallerStackProps = data.CallerStackProperties;
             var dataLocalStackProps = data.LocalStackProperties;
             data.CallerStackProperties = dataLocalStackProps;
-            var localStackProps = new PropertyCollection();
+            using var localStackProps = ObjectPoolManager.Instance.Get<PropertyCollection>();
             data.LocalStackProperties = localStackProps;
 
             if (forProto.PreLoop != null)
@@ -1804,7 +1825,7 @@ namespace MHServerEmu.Games.Properties.Evals
             var dataCallerStackProps = data.CallerStackProperties;
             var dataLocalStackProps = data.LocalStackProperties;
             data.CallerStackProperties = dataLocalStackProps;
-            var localStackProps = new PropertyCollection();
+            using var localStackProps = ObjectPoolManager.Instance.Get<PropertyCollection>();
             data.LocalStackProperties = localStackProps;
 
             if (forEachProto.PreLoop != null)
@@ -1886,7 +1907,7 @@ namespace MHServerEmu.Games.Properties.Evals
             var dataCallerStackProps = data.CallerStackProperties;
             var dataLocalStackProps = data.LocalStackProperties;
             data.CallerStackProperties = dataLocalStackProps;
-            var localStackProps = new PropertyCollection();
+            using var localStackProps = ObjectPoolManager.Instance.Get<PropertyCollection>();
             data.LocalStackProperties = localStackProps;
 
             if (forEachProto.PreLoop != null)
@@ -2009,7 +2030,7 @@ namespace MHServerEmu.Games.Properties.Evals
 
             var dataCallerStackProps = data.CallerStackProperties;
             var dataLocalStackProps = data.LocalStackProperties;
-            var localStackProps = new PropertyCollection();
+            using var localStackProps = ObjectPoolManager.Instance.Get<PropertyCollection>();
 
             bool errors = false;
             foreach (var evalEach in scopeProto.Scope)
@@ -2425,7 +2446,10 @@ namespace MHServerEmu.Games.Properties.Evals
             PropertyInfoTable propInfoTable = GameDatabase.PropertyInfoTable;
             PropertyEnum propEnum = propInfoTable.GetPropertyEnumFromPrototype(assignPropEvalParamsProto.Prop);
             PropertyInfo propInfo = propInfoTable.LookupPropertyInfo(propEnum);
-            PropertyParam[] paramValues = propInfo.DefaultParamValues;
+
+            Span<PropertyParam> paramValues = stackalloc PropertyParam[Property.MaxParamCount];
+            propInfo.DefaultParamValues.CopyTo(paramValues);
+
             for (int i = 0; i < propInfo.ParamCount; i++)
             {
                 if (i >= 4) break;
@@ -2462,7 +2486,7 @@ namespace MHServerEmu.Games.Properties.Evals
                 }
             }
 
-            PropertyId propId = new (propEnum, paramValues);
+            PropertyId propId = new(propEnum, paramValues);
 
             switch (propInfo.DataType)
             {
@@ -2629,7 +2653,7 @@ namespace MHServerEmu.Games.Properties.Evals
             if (propInfoParams.ParamCount != propInfoValue.ParamCount)
                 return evalVar;
 
-            PropertyParam[] paramValues = new PropertyParam[propInfoParams.ParamCount];
+            Span<PropertyParam> paramValues = stackalloc PropertyParam[propInfoParams.ParamCount];
             for (int i = 0; i < propInfoParams.ParamCount; ++i)
             {
                 if (propInfoParams.GetParamType(i) != propInfoValue.GetParamType(i)) return evalVar;
@@ -2653,7 +2677,7 @@ namespace MHServerEmu.Games.Properties.Evals
                 }
             }
 
-            PropertyId propIdValue = new (propEnum, paramValues);
+            PropertyId propIdValue = new(propEnum, paramValues);
 
             switch (propInfoValue.DataType)
             {
@@ -2704,7 +2728,9 @@ namespace MHServerEmu.Games.Properties.Evals
             PropertyInfoTable propInfoTable = GameDatabase.PropertyInfoTable;
             PropertyEnum propEnum = propInfoTable.GetPropertyEnumFromPrototype(loadPropEvalParamsProto.Prop);
             PropertyInfo propInfo = propInfoTable.LookupPropertyInfo(propEnum);
-            PropertyParam[] paramValues = propInfo.DefaultParamValues;
+
+            Span<PropertyParam> paramValues = stackalloc PropertyParam[Property.MaxParamCount];
+            propInfo.DefaultParamValues.CopyTo(paramValues);
 
             for (int i = 0; i < propInfo.ParamCount; ++i)
             {
@@ -2742,7 +2768,7 @@ namespace MHServerEmu.Games.Properties.Evals
                 }
             }
 
-            PropertyId propId = new (propEnum, paramValues);
+            PropertyId propId = new(propEnum, paramValues);
 
             switch (propInfo.DataType)
             {

@@ -1,5 +1,6 @@
 ﻿using System.Diagnostics;
 using MHServerEmu.Core.Logging;
+using MHServerEmu.Core.Memory;
 using MHServerEmu.Games.GameData;
 using MHServerEmu.Games.GameData.Calligraphy;
 using MHServerEmu.Games.GameData.Prototypes;
@@ -95,7 +96,7 @@ namespace MHServerEmu.Games.Properties
                     // Property mixin blueprints are inconsistently named: most have the Prop suffix, but some do not
                     if (propertyInfo.PropertyName == propertyName || propertyInfo.PropertyInfoName == propertyName)
                     {
-                        blueprint.SetPropertyPrototypeDataRef(propertyInfo.PropertyInfoPrototypeRef);
+                        blueprint.SetPropertyPrototypeDataRef(propertyInfo.PrototypeDataRef);
                         propertyInfo.PropertyMixinBlueprintRef = blueprint.Id;
                         infoFound = true;
                         break;
@@ -162,10 +163,10 @@ namespace MHServerEmu.Games.Properties
                 evalQueue.Enqueue(info.Id.Enum);
             }
 
-            PropertyCollection dummyCollection = new();
-            EvalContextData contextData = new();
-            contextData.SetReadOnlyVar_PropertyCollectionPtr(EvalContext.Default, dummyCollection);
-            contextData.SetReadOnlyVar_PropertyId(EvalContext.Var1, PropertyId.Invalid);
+            using PropertyCollection dummyCollection = ObjectPoolManager.Instance.Get<PropertyCollection>();
+            using EvalContextData evalContext = ObjectPoolManager.Instance.Get<EvalContextData>();
+            evalContext.SetReadOnlyVar_PropertyCollectionPtr(EvalContext.Default, dummyCollection);
+            evalContext.SetReadOnlyVar_PropertyId(EvalContext.Var1, PropertyId.Invalid);
 
             while (evalQueue.Count > 0)
             {
@@ -193,7 +194,7 @@ namespace MHServerEmu.Games.Properties
                 }
 
                 if (info.IsEvalAlwaysCalculated == false)
-                    info.SetEvalDefaultValue(PropertyCollection.EvalProperty(info.Id, contextData));
+                    info.SetEvalDefaultValue(PropertyCollection.EvalProperty(info.Id, evalContext));
 
                 evalDoneList[(int)evalPropertyEnum] = true;
             }
@@ -230,9 +231,9 @@ namespace MHServerEmu.Games.Properties
             }
 
             // Load the property info prototype and assign it to the property info instance
-            if (propertyInfo.PropertyInfoPrototypeRef != PrototypeId.Invalid)
+            if (propertyInfo.PrototypeDataRef != PrototypeId.Invalid)
             {
-                var propertyInfoPrototype = GameDatabase.GetPrototype<PropertyInfoPrototype>(propertyInfo.PropertyInfoPrototypeRef);
+                var propertyInfoPrototype = GameDatabase.GetPrototype<PropertyInfoPrototype>(propertyInfo.PrototypeDataRef);
                 propertyInfo.SetPropertyInfoPrototype(propertyInfoPrototype);
             }
 
