@@ -49,8 +49,13 @@ namespace MHServerEmu.Games.Powers
             // These are the players that receive NetMessageActivatePower and create the
             // missile on their own, including the player who used the power in the first place.
             _interestedPlayers.Clear();
-            foreach (Player player in Game.NetworkManager.GetInterestedPlayers(Owner, AOINetworkPolicyValues.AOIChannelProximity))
+
+            List<Player> interestedPlayerList = ListPool<Player>.Instance.Get();
+            Game.NetworkManager.GetInterestedPlayers(interestedPlayerList, Owner, AOINetworkPolicyValues.AOIChannelProximity);
+            foreach (Player player in interestedPlayerList)
                 _interestedPlayers.Add(player);
+
+            ListPool<Player>.Instance.Return(interestedPlayerList);                
 
             CancelCreationDelayEvent();
             return base.Activate(ref settings);
@@ -66,17 +71,23 @@ namespace MHServerEmu.Games.Powers
         protected override bool ApplyInternal(PowerApplication powerApplication)
         {
             // Remove interested players who became no longer interested between activation and application of this power
-            HashSet<Player> currentlyInterestedPlayers = new();
+            HashSet<Player> interestedPlayerSet = HashSetPool<Player>.Instance.Get();
+            List<Player> interestedPlayerList = ListPool<Player>.Instance.Get();
 
-            foreach (Player player in Game.NetworkManager.GetInterestedPlayers(Owner, AOINetworkPolicyValues.AOIChannelProximity))
-                currentlyInterestedPlayers.Add(player);
+            Game.NetworkManager.GetInterestedPlayers(interestedPlayerList, Owner, AOINetworkPolicyValues.AOIChannelProximity);
+
+            foreach (Player player in interestedPlayerList)
+                interestedPlayerSet.Add(player);
 
             // NOTE: It should be safe to remove from a HashSet<T> during iteration as of .NET 6
             foreach (Player player in _interestedPlayers)
             {
-                if (currentlyInterestedPlayers.Contains(player) == false)
+                if (interestedPlayerSet.Contains(player) == false)
                     _interestedPlayers.Remove(player);
             }
+
+            HashSetPool<Player>.Instance.Return(interestedPlayerSet);
+            ListPool<Player>.Instance.Return(interestedPlayerList);
 
             // Do the application
             if (base.ApplyInternal(powerApplication) == false) return false;
@@ -246,7 +257,7 @@ namespace MHServerEmu.Games.Powers
             if (missileContext.InitialDirectionAxisRotation == null) return false;
             if (missileContext.InitialDirectionRandomVariance == null) return false;
 
-            var random = new GRandom((int)powerApplication.PowerRandomSeed + missileIndex * 10);
+            var random = new GRandom(powerApplication.PowerRandomSeed + missileIndex * 10);
             var angleVector = Vector3.NextVector3(random, missileContext.InitialDirectionAxisRotation.ToVector3(), missileContext.InitialDirectionRandomVariance.ToVector3());
 
             if (!Vector3.IsNearZero(angleVector))
@@ -371,7 +382,8 @@ namespace MHServerEmu.Games.Powers
             if (missilePrototype.NaviMethod == LocomotorMethod.MissileSeeking)
                 extraProperties[PropertyEnum.MissileSeekTargetId] = powerApplication.TargetEntityId;
 
-            extraProperties[PropertyEnum.CreatorPowerPrototype] = PrototypeDataRef;
+            // CreatorPowerPrototype needs to be set after SerializeEntityPropertiesForPowerPayload so that it doesn't get overriden
+            //extraProperties[PropertyEnum.CreatorPowerPrototype] = PrototypeDataRef;
             extraProperties[PropertyEnum.PowerRank] = Rank;
 
             extraProperties.CopyProperty(Properties, PropertyEnum.CharacterLevel);
@@ -419,7 +431,7 @@ namespace MHServerEmu.Games.Powers
 
             if (powerApplication.PowerRandomSeed != 0)
             {
-                int seed = (int)powerApplication.PowerRandomSeed * (contextIndex + 1) * 10;
+                int seed = powerApplication.PowerRandomSeed * (contextIndex + 1) * 10;
                 extraProperties[PropertyEnum.MissileSeed] = seed;
             }
 
@@ -428,7 +440,13 @@ namespace MHServerEmu.Games.Powers
             extraProperties.CopyProperty(Properties, PropertyEnum.DamageMult);
             extraProperties.CopyPropertyRange(Properties, PropertyEnum.DamageMultForPower);
 
-            SerializeEntityPropertiesForPowerPayload(GetPayloadPropertySourceEntity(), Properties);    // todo: team-up away powers
+            WorldEntity propertySourceEntity = GetPayloadPropertySourceEntity(GetUltimateOwner());
+            if (propertySourceEntity == null)
+                return;
+
+            SerializeEntityPropertiesForPowerPayload(propertySourceEntity, extraProperties);
+
+            extraProperties[PropertyEnum.CreatorPowerPrototype] = PrototypeDataRef;
         }
 
         private void TransferMissilePierceChance(PropertyCollection extraProperties)
@@ -593,6 +611,12 @@ namespace MHServerEmu.Games.Powers
                         return Logger.WarnReturn(false, $"Failed to schedule a missile creation event Power:{_missilePower}");
 
                 return true;
+            }
+
+            public override void Clear()
+            {
+                _missilePower = default;
+                _powerApplication = default;
             }
         }
     }

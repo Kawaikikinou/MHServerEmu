@@ -335,6 +335,8 @@ namespace MHServerEmu.Games.Behavior
         {
             if (IsOwnerValid() == false || Owner.IsDead || IsEnabled == false ) return;
 
+            if (Game.EntityManager.IsAIEnabled == false) return;
+
             if (Brain.LastThinkQTime == Game.NumQuantumFixedTimeUpdates)
                 Brain.ThinkCountPerFrame++;
             else
@@ -571,6 +573,10 @@ namespace MHServerEmu.Games.Behavior
             Brain?.OnOwnerCollide(whom);
         }
 
+        public void OnAIResurrect()
+        {
+            SetIsEnabled(true);
+        }
 
         public void OnAIStartThrowing(WorldEntity throwableEntity, PrototypeId throwablePowerRef, PrototypeId throwableCancelPowerRef)
         {

@@ -55,6 +55,8 @@ namespace MHServerEmu.Games.Entities.Items
         private ItemSpec _itemSpec = new();
         private List<AffixPropertiesCopyEntry> _affixProperties = new();
 
+        private ulong _tickerId;
+
         public ItemPrototype ItemPrototype { get => Prototype as ItemPrototype; }
         public RarityPrototype RarityPrototype { get => GameDatabase.GetPrototype<RarityPrototype>(Properties[PropertyEnum.ItemRarity]); }
 
@@ -139,14 +141,66 @@ namespace MHServerEmu.Games.Entities.Items
 
         public override void OnSelfAddedToOtherInventory()
         {
-            if (InventoryLocation.IsValid)
+            InventoryLocation invLoc = InventoryLocation;
+
+            if (invLoc.IsValid)
             {
+                InventoryPrototype inventoryProto = invLoc.InventoryPrototype;
+                WorldEntity owner = Game.EntityManager.GetEntity<WorldEntity>(invLoc.ContainerId);
+
                 // Remove sold price after buyback
                 if (IsInBuybackInventory == false)
                     Properties.RemoveProperty(PropertyEnum.ItemSoldPrice);
+
+                // Start ticking
+                if (owner != null && inventoryProto.IsEquipmentInventory)
+                    StartTicking(owner);
             }
 
             base.OnSelfAddedToOtherInventory();
+        }
+
+        public override void OnSelfRemovedFromOtherInventory(InventoryLocation prevInvLoc)
+        {
+            base.OnSelfRemovedFromOtherInventory(prevInvLoc);
+
+            if (prevInvLoc.IsValid)
+            {
+                InventoryPrototype inventoryProto = prevInvLoc.InventoryPrototype;
+                WorldEntity owner = Game.EntityManager.GetEntity<WorldEntity>(prevInvLoc.ContainerId);
+                if (owner == null) return;
+
+                var player = owner.GetOwnerOfType<Player>();
+                var avatar = player?.CurrentAvatar;
+                if (avatar != null && avatar.IsInWorld && avatar.CurrentTeamUpAgent == owner)
+                    RemoveTeamUpAffixesFromAvatar(avatar);
+
+                // Stop ticking
+                if (owner != null && inventoryProto.IsEquipmentInventory)
+                    StopTicking(owner);
+            }
+        }
+
+        private void RemoveTeamUpAffixesFromAvatar(Avatar avatar)
+        {
+            // TODO
+        }
+
+        public void StartTicking(WorldEntity owner)
+        {
+            if (_tickerId != PropertyTicker.InvalidId)
+            {
+                Logger.Warn("StartTicking(): _tickerId != PropertyTicker.InvalidId");
+                return;
+            }
+
+            _tickerId = owner.StartPropertyTicker(Properties, Id, Id, TimeSpan.FromMilliseconds(1000));
+        }
+
+        public void StopTicking(WorldEntity owner)
+        {
+            owner.StopPropertyTicker(_tickerId);
+            _tickerId = PropertyTicker.InvalidId;
         }
 
         public override void OnPropertyChange(PropertyId id, PropertyValue newValue, PropertyValue oldValue, SetPropertyFlags flags)
@@ -211,6 +265,12 @@ namespace MHServerEmu.Games.Entities.Items
             // TODO: Avatar::ValidateEquipmentChange
 
             return true;
+        }
+
+        public PrototypeId GetBoundAgentProtoRef()
+        {
+            _itemSpec.GetBindingState(out PrototypeId agentProtoRef);
+            return agentProtoRef;
         }
 
         public bool GetPowerGranted(out PrototypeId powerProtoRef)
@@ -289,36 +349,6 @@ namespace MHServerEmu.Games.Entities.Items
             sb.AppendLine($"{nameof(_itemSpec)}: {_itemSpec}");
         }
 
-        public override void OnSelfRemovedFromOtherInventory(InventoryLocation prevInvLoc)
-        {
-            base.OnSelfRemovedFromOtherInventory(prevInvLoc);
-
-            // Destroy summoned pet
-            if (prevInvLoc.IsValid && prevInvLoc.InventoryConvenienceLabel == InventoryConvenienceLabel.PetItem)
-            {
-                var itemProto = ItemPrototype;
-                if (itemProto?.ActionsTriggeredOnItemEvent?.Choices == null) return;
-                var itemActionProto = itemProto.ActionsTriggeredOnItemEvent.Choices[0];
-                if (itemActionProto is ItemActionUsePowerPrototype itemActionUsePowerProto){
-                    var powerRef = itemActionUsePowerProto.Power;
-                    var avatar = Game.EntityManager.GetEntity<Avatar>(prevInvLoc.ContainerId);
-                    Power power = avatar?.GetPower(powerRef);
-                    if (power == null) return;
-                    if (power.Prototype is SummonPowerPrototype summonPowerProto)
-                    {
-                        PropertyId summonedEntityCountProp = new(PropertyEnum.PowerSummonedEntityCount, powerRef);
-                        if (avatar.Properties[PropertyEnum.PowerToggleOn, powerRef])
-                        {
-                            EntityHelper.DestroySummonerFromPowerPrototype(avatar, summonPowerProto);
-                            avatar.Properties[PropertyEnum.PowerToggleOn, powerRef] = false;
-                            avatar.Properties.AdjustProperty(-1, summonedEntityCountProp);
-                        }
-                    }
-                }
-
-            }
-        }
-
         public bool DecrementStack(int count = 1)
         {
             if (count < 1) return Logger.WarnReturn(false, "DecrementStack(): count < 1");
@@ -354,7 +384,7 @@ namespace MHServerEmu.Games.Entities.Items
             if (ApplyItemSpecProperties() == false)
                 return Logger.WarnReturn(false, "ApplyItemSpec(): Failed to apply ItemSpec properties");
 
-            itemProto.OnApplyItemSpec(this, _itemSpec);     // TODO (needed for PetTech affixes)
+            itemProto.OnApplyItemSpec(this, _itemSpec);
 
             GRandom random = new(_itemSpec.Seed);
 
@@ -377,22 +407,31 @@ namespace MHServerEmu.Games.Entities.Items
             // NOTE: RNG is reseeded for each affix individually
 
             // Apply built-in affixes
-            foreach (BuiltInAffixDetails builtInAffixDetails in itemProto.GenerateBuiltInAffixDetails(_itemSpec))
+            List<BuiltInAffixDetails> detailsList = ListPool<BuiltInAffixDetails>.Instance.Get();
+            if (itemProto.GenerateBuiltInAffixDetails(_itemSpec, detailsList))
             {
-                AffixPrototype affixProto = builtInAffixDetails.AffixEntryProto.Affix.As<AffixPrototype>();
-                if (affixProto == null)
+                foreach (BuiltInAffixDetails builtInAffixDetails in detailsList)
                 {
-                    Logger.Warn("ApplyItemSpec(): affixProto == null");
-                    continue;
-                }
+                    AffixPrototype affixProto = builtInAffixDetails.AffixEntryProto.Affix.As<AffixPrototype>();
+                    if (affixProto == null)
+                    {
+                        Logger.Warn("ApplyItemSpec(): affixProto == null");
+                        continue;
+                    }
 
-                random.Seed(builtInAffixDetails.Seed);
-                OnAffixAdded(random, affixProto, builtInAffixDetails.ScopeProtoRef, builtInAffixDetails.AvatarProtoRef, builtInAffixDetails.LevelRequirement);
+                    random.Seed(builtInAffixDetails.Seed);
+                    OnAffixAdded(random, affixProto, builtInAffixDetails.ScopeProtoRef, builtInAffixDetails.AvatarProtoRef, builtInAffixDetails.LevelRequirement);
+                }
             }
 
+            ListPool<BuiltInAffixDetails>.Instance.Return(detailsList);
+
             // Apply rolled affixes
-            foreach (AffixSpec affixSpec in _itemSpec.AffixSpecs)
+            IReadOnlyList<AffixSpec> affixSpecs = _itemSpec.AffixSpecs;
+            for (int i = 0; i < affixSpecs.Count; i++)
             {
+                AffixSpec affixSpec = affixSpecs[i];
+
                 if (affixSpec.Seed == 0) return Logger.WarnReturn(false, "ApplyItemSpec(): affixSpec.Seed == 0");
                 random.Seed(affixSpec.Seed);
                 
@@ -676,6 +715,11 @@ namespace MHServerEmu.Games.Entities.Items
             return Eval.RunInt(itemProto.EvalDisplayLevel, evalContext);
         }
 
+        protected override void InitializeProcEffectPowers()
+        {
+            // Don't do anything for items because they are not supposed to do any procs on their own
+        }
+
         private bool TryLevelUpAffix(bool isDeserializing)
         {
             if (Prototype is not LegendaryPrototype)
@@ -791,6 +835,22 @@ namespace MHServerEmu.Games.Entities.Items
 
         private void OnAffixLevelUp()
         {
+            RefreshProcPowerIndexProperties();
+
+            // Restart tickers
+            InventoryLocation invLoc = InventoryLocation;
+            if (invLoc.IsValid)
+            {
+                InventoryPrototype inventoryProto = invLoc.InventoryPrototype;
+                WorldEntity owner = Game.EntityManager.GetEntity<WorldEntity>(invLoc.ContainerId);
+
+                if (owner != null && inventoryProto.IsEquipmentInventory && owner.IsInWorld && owner.IsSimulated)
+                {
+                    StopTicking(owner);
+                    StartTicking(owner);
+                }
+            }
+
             if (Prototype is LegendaryPrototype && Properties[PropertyEnum.ItemAffixLevel] == GetAffixLevelCap()) // TODO check GetAffixLevelCap
             { 
                 var player = GetOwnerOfType<Player>();
@@ -835,11 +895,10 @@ namespace MHServerEmu.Games.Entities.Items
             {
                 Properties[pickInRangeProto.Prop] = GenerateIntWithinRange(randomMult, valueMin, valueMax);
             }
-            else
-            {
-                // The client doesn't have assignment for bool properties here for some reason
-                Logger.Warn($"OnBuiltInPropertyRoll(): Unhandled property data type {propDataType}");
-            }
+
+            // The client doesn't have assignment for bool properties here.
+            // Entity/Items/Armor/UniquePrototypes/Avatars/AnyHero/Slot4/Unique189.prototype has a bool range property (CCResistAlwaysAll),
+            // but it seems to be a mistake, since it uses Difficulty/Curves/Items/TenacityItemCurve.curve[ItemLevelProp] to calculate its range.
 
             return true;
         }
@@ -851,7 +910,7 @@ namespace MHServerEmu.Games.Entities.Items
 
             if (propDataType != PropertyDataType.Real && propDataType != PropertyDataType.Integer && propDataType != PropertyDataType.Asset)
             {
-                return Logger.WarnReturn(false, "OnBuiltInPropertyRoll(): The following Item has a built-in set PropertyEntry with a property " +
+                return Logger.WarnReturn(false, "OnBuiltInPropertySet(): The following Item has a built-in set PropertyEntry with a property " +
                     $"that is not an int/float/asset prop, which doesn't work!\nItem: [{this}]\nProperty: [{propertyInfo.PropertyName}]");
             }
 
@@ -1158,7 +1217,24 @@ namespace MHServerEmu.Games.Entities.Items
 
         private void RefreshProcPowerIndexProperties()
         {
-            // TODO
+            int itemLevel = Properties[PropertyEnum.ItemLevel];
+            float itemVariation = Properties[PropertyEnum.ItemVariation];
+            int stackCount = CurrentStackSize;
+
+            // Use a temporary property collection to store proc properties
+            // because we can't modify our collections while iterating.
+            using PropertyCollection procProperties = ObjectPoolManager.Instance.Get<PropertyCollection>();
+            foreach (PropertyEnum procProperty in Property.ProcPropertyTypesAll)
+                procProperties.CopyPropertyRange(Properties, procProperty);
+
+            foreach (var kvp in procProperties)
+            {
+                Property.FromParam(kvp.Key, 1, out PrototypeId procPowerProtoRef);
+
+                Properties[PropertyEnum.ProcPowerItemLevel, procPowerProtoRef] = itemLevel;
+                Properties[PropertyEnum.ProcPowerItemVariation, procPowerProtoRef] = itemVariation;
+                Properties[PropertyEnum.ProcPowerInvStackCount, procPowerProtoRef] = stackCount;
+            }
         }
 
         private PrototypeId GetTriggeredPower(ItemEventType eventType, ItemActionType actionType)
@@ -1497,7 +1573,7 @@ namespace MHServerEmu.Games.Entities.Items
                 properties[PropertyEnum.DamageRegionPlayerToMob] = affixLimits.DamageRegionPlayerToMob;
             }
 
-            properties[PropertyEnum.DangerRoomScenarioItemDbGuid] = DatabaseUniqueId; // we need this?
+            properties[PropertyEnum.DangerRoomScenarioItemDbGuid] = DatabaseUniqueId; 
         }
 
         public bool IsGear(AvatarPrototype avatarProto)

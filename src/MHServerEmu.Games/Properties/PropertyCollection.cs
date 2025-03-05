@@ -92,6 +92,12 @@ namespace MHServerEmu.Games.Properties
             set => SetProperty(value, new(propertyEnum, param0));
         }
 
+        public PropertyValue this[PropertyEnum propertyEnum, ManaType param0]
+        {
+            get => GetProperty(new(propertyEnum, param0));
+            set => SetProperty(value, new(propertyEnum, param0));
+        }
+
         // 2 params
 
         public PropertyValue this[PropertyEnum propertyEnum, PropertyParam param0, PropertyParam param1]
@@ -136,6 +142,8 @@ namespace MHServerEmu.Games.Properties
 
         #endregion
 
+        public bool IsInPool { get; set; }
+
         public PropertyCollection() { }
 
         // NOTE: In the client GetProperty() and SetProperty() handle conversion to and from PropertyValue,
@@ -154,6 +162,45 @@ namespace MHServerEmu.Games.Properties
         public PropertyValue GetProperty(PropertyId id)
         {
             return GetPropertyValue(id);
+        }
+
+        public void GetPropertyMinMaxFloat(PropertyId id, out float min, out float max)
+        {
+            // This is ugly
+            PropertyInfoTable propertyInfoTable = GameDatabase.PropertyInfoTable;
+            PropertyInfo propertyInfo = propertyInfoTable.LookupPropertyInfo(id.Enum);
+
+            if (propertyInfo.DataType != PropertyDataType.Real)
+            {
+                min = 0f;
+                max = 0f;
+                Logger.Warn("GetPropertyMinMaxFloat(): Attempting to lookup min/max float values for a non-float property");
+                return;
+            }
+
+            switch (id.Enum)
+            {
+                // Default to prototype data
+                default:
+                    PropertyInfoPrototype propertyInfoProto = propertyInfo.Prototype;
+                    min = propertyInfoProto.Min;
+                    max = propertyInfoProto.Max;
+                    break;
+
+                // Cap to max values for resources
+                case PropertyEnum.Endurance:
+                    Property.FromParam(id, 0, out int manaType);
+                    min = 0f;
+                    max = GetProperty(new(PropertyEnum.EnduranceMax, (PropertyParam)manaType));
+
+                    break;
+
+                case PropertyEnum.SecondaryResource:
+                    min = 0f;
+                    max = GetProperty(PropertyEnum.SecondaryResourceMax);
+
+                    break;
+            }
         }
 
         /// <summary>
@@ -203,6 +250,12 @@ namespace MHServerEmu.Games.Properties
                 return PropertyId.Invalid;
 
             return curveProperty.IndexPropertyId;
+        }
+
+        public void GetPropertyCurveIndexPropertyEnumValues(HashSet<PropertyEnum> enumSet)
+        {
+            foreach (CurveProperty curveProperty in _curveList.Values)
+                enumSet.Add(curveProperty.IndexPropertyId.Enum);
         }
 
         /// <summary>
@@ -333,6 +386,20 @@ namespace MHServerEmu.Games.Properties
         public bool HasProperty(PropertyId id)
         {
             return _aggregateList.GetPropertyValue(id, out _);
+        }
+
+        /// <summary>
+        /// Returns <see langword="true"/> if this <see cref="PropertyCollection"/> contains any properties that are applied over time.
+        /// </summary>
+        public bool HasOverTimeProperties()
+        {
+            foreach (var kvp in this)
+            {
+                if (Property.OverTimeProperties.Contains(kvp.Key.Enum))
+                    return true;
+            }
+
+            return false;
         }
 
         /// <summary>

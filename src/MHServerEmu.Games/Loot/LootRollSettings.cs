@@ -25,18 +25,24 @@ namespace MHServerEmu.Games.Loot
         public PrototypeId RegionScenarioRarity { get; set; }   // LootRollRequireRegionScenarioRarityPrototype
         public PrototypeId RegionAffixTable { get; set; }       // LootRollSetRegionAffixTablePrototype
 
-        public int KillCount { get; set; }                      // LootRollRequireKillCountPrototype
+        public int KillCount { get; set; }                          // LootRollRequireKillCountPrototype
         public Weekday UsableWeekday { get; set; } = Weekday.All;   // LootRollRequireWeekdayPrototype
 
-        public HashSet<PrototypeId> Rarities { get; } = new();  // LootRollSetRarityPrototype
+        public HashSet<PrototypeId> Rarities { get; } = new();      // LootRollSetRarityPrototype
 
-        public float DropDistanceThresholdSq { get; set; }      // DistanceRestrictionPrototype::Allow()
+        public float DropDistanceSq { get; set; }                   // DistanceRestrictionPrototype::Allow()
+
+        public KeywordsMask SourceEntityKeywords { get; set; } = KeywordsMask.Empty;
+        public KeywordsMask AvatarConditionKeywords { get; set; } = KeywordsMask.Empty;
+        public KeywordsMask RegionKeywords { get; set; } = KeywordsMask.Empty;
 
         // LootRollModifyAffixLimitsPrototype
         public Dictionary<AffixPosition, short> AffixLimitMinByPositionModifierDict { get; } = new();   // Modifies the minimum number of affixes for position
         public Dictionary<AffixPosition, short> AffixLimitMaxByPositionModifierDict { get; } = new();   // Modifies the maximum number of affixes for position
         public Dictionary<PrototypeId, short> AffixLimitByCategoryModifierDict { get; } = new();
         public PrototypeId MissionRef { get; set; }
+
+        public bool IsInPool { get; set; }
 
         public LootRollSettings() { }   // Use pooling instead of calling this directly
 
@@ -71,7 +77,11 @@ namespace MHServerEmu.Games.Loot
                     Rarities.Add(rarityProtoRef);
             }
 
-            DropDistanceThresholdSq = other.DropDistanceThresholdSq;
+            DropDistanceSq = other.DropDistanceSq;
+
+            SourceEntityKeywords = other.SourceEntityKeywords;
+            AvatarConditionKeywords = other.AvatarConditionKeywords;
+            RegionKeywords = other.RegionKeywords;
 
             AffixLimitMinByPositionModifierDict.Clear();
             if (other.AffixLimitMinByPositionModifierDict.Count > 0)
@@ -121,7 +131,11 @@ namespace MHServerEmu.Games.Loot
 
             Rarities.Clear();
 
-            DropDistanceThresholdSq = default;
+            DropDistanceSq = default;
+
+            SourceEntityKeywords = KeywordsMask.Empty;
+            AvatarConditionKeywords = KeywordsMask.Empty;
+            RegionKeywords = KeywordsMask.Empty;
 
             AffixLimitMinByPositionModifierDict.Clear();
             AffixLimitMaxByPositionModifierDict.Clear();
@@ -163,7 +177,7 @@ namespace MHServerEmu.Games.Loot
         {
             return DropChanceModifiers.HasFlag(LootDropChanceModifiers.CooldownOncePerXHours) ||
                    DropChanceModifiers.HasFlag(LootDropChanceModifiers.CooldownOncePerRollover) ||
-                   DropChanceModifiers.HasFlag(LootDropChanceModifiers.CooldownOncePerXHours);
+                   DropChanceModifiers.HasFlag(LootDropChanceModifiers.CooldownByChannel);
         }
     }
 }

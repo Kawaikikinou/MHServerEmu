@@ -19,6 +19,8 @@ namespace MHServerEmu.Games.Populations
         private SpawnReservationMap _regionLookup = new();
         private Dictionary<PrototypeId, SpawnReservationMap> _areaLookup = new();
         private Dictionary<uint, SpawnReservationMap> _cellLookup = new();
+        private Picker<SpawnReservation> _reusablePicker = new();   // TODO: Replace with pooling
+        public TimeSpan _respawnDelay;
 
         public SpawnMarkerRegistry(Region region)
         {
@@ -301,7 +303,7 @@ namespace MHServerEmu.Games.Populations
                     foreach (var testReservation in list)
                     {
                         if (spawnAreas.Count > 0 && spawnAreas.Contains(spawnArea) == false) continue;
-                        if (TestReservation(testReservation, flag))
+                        if (TestReservation(testReservation, flag, true))
                             picker.Add(testReservation);
                     }
                 }
@@ -314,7 +316,7 @@ namespace MHServerEmu.Games.Populations
                     if (_areaLookup.TryGetValue(spawnAreaRef, out var spawnMap) == false || spawnMap == null) continue;
                     if (spawnMap.TryGetValue(markerRef, out var list) == false || list == null) continue;
                     foreach (var testReservation in list)
-                        if (TestReservation(testReservation, flag))
+                        if (TestReservation(testReservation, flag, true))
                             picker.Add(testReservation);
                 }
             }
@@ -322,16 +324,25 @@ namespace MHServerEmu.Games.Populations
             {
                 if (_regionLookup.TryGetValue(markerRef, out var list) && list != null)
                     foreach (var testReservation in list)
-                        if (TestReservation(testReservation, flag))
+                        if (TestReservation(testReservation, flag, true))
                             picker.Add(testReservation);
             }
             return picker.Empty() == false;
         }
 
-        public SpawnReservation ReserveFreeReservation(PrototypeId markerRef, GRandom random, SpawnLocation spawnLocation, SpawnFlags flag)
+        public SpawnReservation ReserveFreeReservation(PrototypeId markerRef, GRandom random, SpawnLocation spawnLocation, SpawnFlags flag, int respawnDelayMS)
         {
-            Picker<SpawnReservation> picker = new(random);
+            Picker<SpawnReservation> picker = _reusablePicker;  // TODO: replace with pooling
+            picker.Initialize(random);
+            _respawnDelay = TimeSpan.FromMilliseconds(respawnDelayMS);
+
             bool canPick = PickReservation(picker, markerRef, spawnLocation, flag);
+
+            if (canPick == false && flag.HasFlag(SpawnFlags.IgnoreSimulated))
+            {
+                flag &= ~SpawnFlags.IgnoreSimulated;
+                canPick = PickReservation(picker, markerRef, spawnLocation, flag);
+            }
 
             if (canPick == false && flag.HasFlag(SpawnFlags.IgnoreBlackout) == false)
             {
@@ -368,12 +379,39 @@ namespace MHServerEmu.Games.Populations
             return null;
         }
 
-        public static bool TestReservation(SpawnReservation reservation, SpawnFlags flag)
+        public void OnSimulation(Cell cell, int numPlayers)
         {
-            if (reservation.State != MarkerState.Free) return false;
+            List<SpawnReservation> reservations = new();
+
+            if (numPlayers == 0)
+            {
+                GetReservationsInCell(cell.Id, reservations);
+                foreach (var reservation in reservations)
+                    if (reservation.Cell == cell)
+                    {
+                        reservation.Simulated = false;
+                        reservation.LastFreeTime = TimeSpan.Zero;
+                    }
+            }
+            else if (numPlayers == 1)
+            {
+                GetReservationsInCell(cell.Id, reservations);
+                foreach (var reservation in reservations)
+                    if (reservation.Cell == cell)
+                        reservation.Simulated = true;
+            }
+        }
+
+        public bool TestReservation(SpawnReservation reservation, SpawnFlags flag, bool checkRespawn = false, bool checkFree = true)
+        {
+            if (checkFree && reservation.State != MarkerState.Free) return false;
             if (flag.HasFlag(SpawnFlags.IgnoreSimulated) && reservation.Simulated) return false;
             if (flag.HasFlag(SpawnFlags.IgnoreBlackout) == false && reservation.BlackOutZones > 0) return false;
-            // TODO other flags;
+            if (checkRespawn && _respawnDelay != TimeSpan.Zero)
+            {
+                var reservationTime = Game.Current.CurrentTime - reservation.LastFreeTime;
+                if (reservationTime < _respawnDelay) return false;
+            }
             return true;
         }
 
@@ -386,13 +424,13 @@ namespace MHServerEmu.Games.Populations
             return count;
         }
 
-        public int CalcFreeReservation(PrototypeId markerRef, PrototypeId spawnAreaRef, SpawnFlags flag = SpawnFlags.IgnoreBlackout)
+        public int CalcMarkerReservations(PrototypeId markerRef, PrototypeId spawnAreaRef, SpawnFlags flag = SpawnFlags.IgnoreBlackout)
         {
             int count = 0;
             if (_areaLookup.TryGetValue(spawnAreaRef, out var spawnMap) && spawnMap != null)
                 if (spawnMap.TryGetValue(markerRef, out var list) == false && list != null)
                     foreach (var testReservation in list)
-                        if (TestReservation(testReservation, flag)) count++;
+                        if (TestReservation(testReservation, flag, false, false)) count++;
             return count;
         }
 

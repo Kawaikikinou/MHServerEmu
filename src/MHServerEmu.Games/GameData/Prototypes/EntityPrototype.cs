@@ -287,10 +287,13 @@ namespace MHServerEmu.Games.GameData.Prototypes
 
         private static readonly Logger Logger = LogManager.CreateLogger();
 
-        private KeywordsMask _keywordsMask; 
+        private KeywordsMask _keywordsMask;
 
         private object _interactionDataLock;
         private bool _interactionDataCached;
+
+        [DoNotCopy]
+        public KeywordsMask KeywordsMask { get => _keywordsMask; }
 
         [DoNotCopy]
         public bool IsVacuumable { get; protected set; }
@@ -726,6 +729,16 @@ namespace MHServerEmu.Games.GameData.Prototypes
     {
         public PrototypeId Appearance { get; protected set; }
         public PrototypeId[] OnActivatePowers { get; protected set; }
+
+        [DoNotCopy]
+        public EntityAppearanceEnum AppearanceEnum { get; protected set; }
+
+        public override void PostProcess()
+        {
+            base.PostProcess();
+            var appreanceProto = Appearance.As<EntityAppearancePrototype>();
+            AppearanceEnum = (appreanceProto != null) ? appreanceProto.AppearanceEnum : EntityAppearanceEnum.None;
+        }
     }
 
     public class DoorEntityStatePrototype : EntityStatePrototype

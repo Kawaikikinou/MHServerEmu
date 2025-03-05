@@ -146,6 +146,10 @@ namespace MHServerEmu.Games.GameData.Prototypes
         //---
 
         [DoNotCopy]
+        public KeywordsMask KeywordsMask { get; private set; }
+        [DoNotCopy]
+        public bool HasKeywords { get => Keywords.HasValue(); }
+        [DoNotCopy]
         public DifficultyTierMask DifficultyTierMask { get; private set; }
         [DoNotCopy]
         public bool HasPvPMetaGame { get; private set; }
@@ -161,8 +165,6 @@ namespace MHServerEmu.Games.GameData.Prototypes
         public bool IsPrivate { get => IsPublic == false; }
 
         private Dictionary<AssetId, List<LootTableAssignmentPrototype>> _lootTableMap = new();
-
-        private KeywordsMask _keywordsMask;
 
         public static bool Equivalent(RegionPrototype regionA, RegionPrototype regionB)
         {
@@ -252,7 +254,7 @@ namespace MHServerEmu.Games.GameData.Prototypes
                     }
                 }
 
-            _keywordsMask = KeywordPrototype.GetBitMaskForKeywordList(Keywords);
+            KeywordsMask = KeywordPrototype.GetBitMaskForKeywordList(Keywords);
 
             // GetLevelAccessRestrictionMinMax client only?
 
@@ -319,7 +321,7 @@ namespace MHServerEmu.Games.GameData.Prototypes
 
         public bool HasKeyword(KeywordPrototype keywordProto)
         {
-            return keywordProto != null && KeywordPrototype.TestKeywordBit(_keywordsMask, keywordProto);
+            return keywordProto != null && KeywordPrototype.TestKeywordBit(KeywordsMask, keywordProto);
         }
 
         public bool HasKeyword(PrototypeId keywordRef)
@@ -372,7 +374,7 @@ namespace MHServerEmu.Games.GameData.Prototypes
             return largestTeamSize;
         }
 
-        public static void BuildRegionsFromFilters(SortedSet<PrototypeId> regions, PrototypeId[] includeRegions, bool includeChildren, PrototypeId[] excludeRegions)
+        public static void BuildRegionsFromFilters(HashSet<PrototypeId> regions, PrototypeId[] includeRegions, bool includeChildren, PrototypeId[] excludeRegions)
         {
             if (includeRegions.HasValue())
                 foreach (var regionRef in includeRegions)

@@ -99,6 +99,43 @@ namespace MHServerEmu.Games.Properties
             PropertyEnum.ProcNotKeyword
         };
 
+        public static readonly PropertyEnum[] ProcPropertyTypesKeyword = new PropertyEnum[]
+        {
+            PropertyEnum.ProcKeyword,
+            PropertyEnum.ProcNotKeyword
+        };
+
+        public static readonly PropertyEnum[] StatusResistByDurationConditional = new PropertyEnum[]
+        {
+            PropertyEnum.StatusResistByDurationMS,
+            PropertyEnum.StatusResistByDurationMSKwd,
+            PropertyEnum.StatusResistByDurationPct,
+            PropertyEnum.StatusResistByDurationPctKwd
+        };
+
+        public static readonly HashSet<PropertyEnum> OverTimeProperties = new HashSet<PropertyEnum>()
+        {
+            PropertyEnum.BoundsScaleRadiusCOTUnitsPerSec,
+            PropertyEnum.DamageAccumulationCOT,
+            PropertyEnum.DamageConversionForPower,
+            PropertyEnum.DamageConversionRatioForPower,
+            PropertyEnum.DamageOverTimeBase,
+            PropertyEnum.DamageOverTimeBasePerLevel,
+            PropertyEnum.DamageOverTimeBaseBonus,
+            PropertyEnum.DamageOverTimeBaseUnmodified,
+            PropertyEnum.DamageOverTimeBaseUnmodPerRank,
+            PropertyEnum.DamageOverTimeMagnitude,
+            PropertyEnum.DamageOverTimePctTargetHealthMax,
+            PropertyEnum.DamageOverTimeVariance,
+            PropertyEnum.EnduranceCOTBase,
+            PropertyEnum.EnduranceCOTPctBase,
+            PropertyEnum.HealingOverTimeBase,
+            PropertyEnum.HealingOverTimeBasePct,
+            PropertyEnum.PowerHealthCostOverTime,
+            PropertyEnum.SecondaryResourceCOTBase,
+            PropertyEnum.SecondaryResourceCOTPct
+        };
+
         public static void FromParam(PropertyEnum propertyEnum, int paramIndex, PropertyParam paramValue, out AssetId assetId)
         {
             PropertyInfo info = GameDatabase.PropertyInfoTable.LookupPropertyInfo(propertyEnum);

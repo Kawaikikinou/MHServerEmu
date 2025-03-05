@@ -1,15 +1,21 @@
-﻿using MHServerEmu.Core.VectorMath;
+﻿using MHServerEmu.Core.Collections;
+using MHServerEmu.Core.Collisions;
+using MHServerEmu.Core.Logging;
+using MHServerEmu.Core.Memory;
+using MHServerEmu.Core.VectorMath;
 using MHServerEmu.Games.GameData.Prototypes;
 
 namespace MHServerEmu.Games.Entities.Physics
 {
     public class EntityPhysics
     {
+        private static readonly Logger Logger = LogManager.CreateLogger();
+
         public WorldEntity Entity;
         public uint RegisteredPhysicsFrameId { get; set; }
         public int CollisionId { get; private set; }
         public SortedDictionary<ulong, OverlapEntityEntry> OverlappedEntities { get; private set; }
-        public SortedSet<ulong> AttachedEntities { get; private set; }
+        public SortedVector<ulong> AttachedEntities { get; private set; }
 
         private readonly Vector3[] _externalForces;
         private readonly Vector3[] _repulsionForces;
@@ -77,18 +83,28 @@ namespace MHServerEmu.Games.Entities.Physics
             _hasExternalForces[index] = false;
         }
 
-        public bool GetAttachedEntities(out ulong[] attachedEntities)
+        public bool GetAttachedEntities(List<ulong> attachedEntities)
         {
             if (AttachedEntities == null)
-            {
-                attachedEntities = null;
                 return false;
-            }
-            attachedEntities = AttachedEntities.ToArray();
-            return attachedEntities.Length > 0;
+
+            // SortedVector implements ICollection, so it should be more efficient to AddRange instead of iterating
+            attachedEntities.AddRange(AttachedEntities);
+            return attachedEntities.Count > 0;
         }
 
-        public void AddRepulsionForce(Vector3 force)
+        public bool GetOverlappingEntities(List<ulong> overlappingEntities)
+        {
+            foreach (var kvp in OverlappedEntities)
+            {
+                if (kvp.Value.Overlapped)
+                    overlappingEntities.Add(kvp.Key);
+            }
+
+            return overlappingEntities.Count > 0;
+        }
+
+        public void AddRepulsionForce(in Vector3 force)
         {
             if (Entity == null) return;
             if (Entity.Locomotor != null)
@@ -104,12 +120,24 @@ namespace MHServerEmu.Games.Entities.Physics
             return AttachedEntities != null && AttachedEntities.Count > 0;
         }
 
-        public void ApplyInternalForce(Vector3 force)
+        public void ApplyInternalForce(in Vector3 force)
         {
             ApplyForce(force, false);
         }
 
-        private void ApplyForce(Vector3 force, bool external)
+        public void ApplyKnockbackForce(in Vector3 position, float time, float speed, float acceleration)
+        {
+            // Logger.Debug($"ApplyKnockbackForce(): entity=[{Entity.PrototypeName}] source=[{position}], time={time}, acceleration={acceleration}");
+
+            var physicsMgr = GetPhysicsManager();
+            if (physicsMgr == null || Entity.IsInWorld == false) return;
+            if (Segment.IsNearZero(speed) && Segment.IsNearZero(acceleration)) return;
+            if (time <= 0) return;
+
+            physicsMgr.AddKnockbackForce(Entity, position, time, speed, acceleration);
+        }
+
+        private void ApplyForce(in Vector3 force, bool external)
         {
             if (!Vector3.IsFinite(force) || Vector3.IsNearZero(force) || !Entity.IsInWorld || Entity.Locomotor == null)
                 return;
@@ -123,7 +151,9 @@ namespace MHServerEmu.Games.Entities.Physics
         {
             if (Entity == null) return;
             var manager = Entity.Game.EntityManager;
-            if (GetAttachedEntities(out var attachedEntities))
+
+            List<ulong> attachedEntities = ListPool<ulong>.Instance.Get();
+            if (GetAttachedEntities(attachedEntities))
                 foreach (var entityId in attachedEntities)
                 {
                     var childEntity = manager.GetEntity<WorldEntity>(entityId);
@@ -131,9 +161,20 @@ namespace MHServerEmu.Games.Entities.Physics
                         DetachChild(childEntity.Physics);
                 }
             AttachedEntities?.Clear();
+            ListPool<ulong>.Instance.Return(attachedEntities);
         }
 
-        private void DetachChild(EntityPhysics physics)
+        public void AttachChild(EntityPhysics physics)
+        {
+            if (Entity == null && physics.Entity == null) return;
+            if (Entity.IsInWorld == false || Entity.TestStatus(EntityStatus.ExitingWorld)) return;
+            if (physics.Entity.IsInWorld == false || physics.Entity.TestStatus(EntityStatus.ExitingWorld)) return;
+
+            AttachedEntities ??= new();
+            AttachedEntities.Add(physics.Entity.Id);
+        }
+
+        public void DetachChild(EntityPhysics physics)
         {
             if (AttachedEntities != null && Entity != null && physics.Entity != null)
                 AttachedEntities.Remove(physics.Entity.Id);
@@ -166,15 +207,15 @@ namespace MHServerEmu.Games.Entities.Physics
         }
     }
 
-    public class OverlapEntityEntry
+    public readonly struct OverlapEntityEntry
     {
-        public bool Overlapped;
-        public uint Frame;
+        public readonly bool Overlapped;
+        public readonly uint Frame;
 
-        public OverlapEntityEntry()
+        public OverlapEntityEntry(bool overlapped = false, uint frame = 0)
         {
-            Overlapped = false;
-            Frame = 0;
+            Overlapped = overlapped;
+            Frame = frame;
         }
     }
 }

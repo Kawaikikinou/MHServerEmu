@@ -1,5 +1,6 @@
 ﻿using MHServerEmu.Core.Extensions;
 using MHServerEmu.Core.Logging;
+using MHServerEmu.Core.Memory;
 using MHServerEmu.Games.Common;
 using MHServerEmu.Games.Entities;
 using MHServerEmu.Games.GameData;
@@ -111,8 +112,7 @@ namespace MHServerEmu.Games.Dialog
 
                 if (missionOption is MissionConditionMissionCompleteOption completeOption)
                 {
-                    SortedSet<PrototypeId> completeMissions = completeOption.GetCompleteMissionRefs();
-                    foreach (PrototypeId completeMissionRef in completeMissions)
+                    foreach (PrototypeId completeMissionRef in completeOption.CompleteMissionRefs)
                     {
                         if (completeMissionRef == PrototypeId.Invalid) continue;
                         ExtraMissionData completeMissionData = GetMissionData(completeMissionRef);
@@ -492,6 +492,7 @@ namespace MHServerEmu.Games.Dialog
             map.Clear();
 
             var worldEntityProto = entity.WorldEntityPrototype;
+            HashSet<InteractionOption> checkList = HashSetPool<InteractionOption>.Instance.Get();
 
             if (entity is Transition transition)
             {
@@ -507,7 +508,8 @@ namespace MHServerEmu.Games.Dialog
                             foreach (var currentOption in data.Options)
                             {
                                 if (currentOption == null) continue;
-                                currentOption.InterestedInEntity(map, entity, new());
+                                currentOption.InterestedInEntity(map, entity, checkList);
+                                checkList.Clear();
                             }
                         }
                     }
@@ -528,15 +530,28 @@ namespace MHServerEmu.Games.Dialog
 
             InteractionData interactionData = worldEntityProto.GetInteractionData();
             if (interactionData != null && interactionData.HasAnyOptionFlags())
+            {
                 foreach (var option in interactionData.Options)
-                    option.InterestedInEntity(map, entity, new());
+                {
+                    option.InterestedInEntity(map, entity, checkList);
+                    checkList.Clear();
+                }
+            }
 
             List<InteractionData> keywordsInteractionData = worldEntityProto.GetKeywordsInteractionData();
             foreach (var interKeyData in keywordsInteractionData)
+            {
                 if (interKeyData != null && interKeyData.HasAnyOptionFlags())
+                {
                     foreach (var option in interKeyData.Options)
-                        option.InterestedInEntity(map, entity, new());
+                    {
+                        option.InterestedInEntity(map, entity, checkList);
+                        checkList.Clear();
+                    }
+                }
+            }
 
+            HashSetPool<InteractionOption>.Instance.Return(checkList);
             return map.Count > 0;
         }
 
@@ -1396,7 +1411,7 @@ namespace MHServerEmu.Games.Dialog
     {      
         public PrototypeId MissionRef { get; set; }
         public HashSet<BaseMissionOption> Options { get; set; }
-        public SortedSet<PrototypeId> Contexts { get; set; }
+        public HashSet<PrototypeId> Contexts { get; set; }
         public HashSet<BaseMissionOption> CompleteOptions { get; set; }
         public bool PlayerHUDShowObjs { get; set; }
 

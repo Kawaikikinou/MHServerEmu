@@ -91,7 +91,7 @@ namespace MHServerEmu.Games.Loot
                 inputSettings.EventType >= LootDropEventType.OnKilled &&
                 inputSettings.EventType <= LootDropEventType.OnKilledMiniBoss)
             {
-                List<MissionLootTable> missionLootTableList = ListPool<MissionLootTable>.Instance.Rent();
+                List<MissionLootTable> missionLootTableList = ListPool<MissionLootTable>.Instance.Get();
 
                 if (MissionManager.GetMissionLootTablesForEnemy(inputSettings.SourceEntity, inputSettings.Player, missionLootTableList))
                 {
@@ -263,7 +263,7 @@ namespace MHServerEmu.Games.Loot
             bool success = true;
 
             // Use a list to process ItemSpec + item CurrencySpec loot together
-            List<Item> itemList = ListPool<Item>.Instance.Rent();
+            List<Item> itemList = ListPool<Item>.Instance.Get();
 
             // Reusable property collection for applying extra properties
             using PropertyCollection properties = ObjectPoolManager.Instance.Get<PropertyCollection>();
@@ -299,6 +299,7 @@ namespace MHServerEmu.Games.Loot
                         goto end;
                     }
 
+                    item.Properties[PropertyEnum.InventoryStackCount] = itemSpec.StackCount;
                     itemList.Add(item);
                 }
             }
@@ -488,7 +489,7 @@ namespace MHServerEmu.Games.Loot
 
             _resolver.SetContext(lootContext, player);
 
-            AvatarPrototype avatarProto = player.CurrentAvatar?.AvatarPrototype;
+            AvatarPrototype avatarProto = player?.CurrentAvatar?.AvatarPrototype;
 
             using DropFilterArguments filterArgs = ObjectPoolManager.Instance.Get<DropFilterArguments>();
             filterArgs.ItemProto = itemProto;
@@ -715,7 +716,10 @@ namespace MHServerEmu.Games.Loot
             float startOrientation = rng.NextFloat(MathHelper.TwoPi);
             float orientation = startOrientation;
 
-            float radius = MathF.Max(bounds.Radius, lootLocationData.MinRadius) + LootSpawnGrid.CellRadius;
+            float cellRadius = _lootSpawnGrid.CellRadius;
+            float cellDiameter = _lootSpawnGrid.CellDiameter;
+
+            float radius = MathF.Max(bounds.Radius, lootLocationData.MinRadius) + cellRadius;
 
             while (radius < LootSpawnGrid.MaxSpiralRadius)
             {
@@ -728,7 +732,7 @@ namespace MHServerEmu.Games.Loot
                     return dropPosition;
 
                 // Move further along the circumference of the current radius randomly
-                float orientationStep = MathF.Asin(LootSpawnGrid.CellRadius / (LootSpawnGrid.CellRadius + radius)) * 2f;
+                float orientationStep = MathF.Asin(cellRadius / (cellRadius + radius)) * 2f;
                 int numSteps = rng.Next(1, (int)(MathHelper.TwoPi / orientationStep));
                 orientation += orientationStep * numSteps;
 
@@ -736,7 +740,7 @@ namespace MHServerEmu.Games.Loot
                 if (orientation - startOrientation > MathHelper.TwoPi)
                 {
                     orientation = startOrientation;
-                    radius += LootSpawnGrid.CellDiameter;
+                    radius += cellDiameter;
                 }
             }
 

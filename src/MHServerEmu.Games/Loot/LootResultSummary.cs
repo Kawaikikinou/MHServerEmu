@@ -35,6 +35,8 @@ namespace MHServerEmu.Games.Loot
 
         public int NumDrops { get => ItemSpecs.Count + AgentSpecs.Count + Credits.Count + Currencies.Count; }
 
+        public bool IsInPool { get; set; }
+
         public LootResultSummary() { }
 
         public void Add(in LootResult lootResult)
@@ -86,19 +88,16 @@ namespace MHServerEmu.Games.Loot
                     break;
 
                 case LootType.CallbackNode:
-                    Logger.Debug($"Add(): callbackNode=[{lootResult.CallbackNodeProto.GetType()}]");
                     CallbackNodes.Add(lootResult.CallbackNodeProto);
                     Types |= LootType.CallbackNode;
                     break;
 
                 case LootType.VanityTitle:
-                    Logger.Debug($"Add(): vanityTitle=[{lootResult.VanityTitleProtoRef.GetName()}]");
                     VanityTitles.Add(lootResult.VanityTitleProtoRef);
                     Types |= LootType.VanityTitle;
                     break;
 
                 case LootType.VendorXP:
-                    Logger.Debug($"Add(): vendorXPSummary=[{lootResult.VendorXPSummary}]");
                     VendorXP.Add(lootResult.VendorXPSummary);
                     Types |= LootType.VendorXP;
                     break;

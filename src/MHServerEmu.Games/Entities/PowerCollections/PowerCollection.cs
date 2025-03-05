@@ -133,33 +133,32 @@ namespace MHServerEmu.Games.Entities.PowerCollections
             return record.Power;
         }
 
-        public IEnumerable<Power> GetPowersMatchingAnyKeyword(IEnumerable<PrototypeId> powerKeywordRefs)
+        public void GetPowersMatchingAnyKeyword(List<Power> powers, PrototypeId[] keywords)
         {
             foreach (PowerCollectionRecord record in _powerDict.Values)
             {
                 Power power = record.Power;
-                if (power == null) continue;
+                if (power == null)
+                    continue;
 
-                foreach (PrototypeId powerKeywordProtoRef in powerKeywordRefs)
+                foreach (PrototypeId keywordProtoRef in keywords)
                 {
-                    if (power.HasKeyword(powerKeywordProtoRef.As<KeywordPrototype>()))
+                    if (power.HasKeyword(keywordProtoRef.As<KeywordPrototype>()))
                     {
-                        yield return power;
+                        powers.Add(power);
                         break;
                     }
                 }
             }
         }
 
-        public bool ContainsPower(PrototypeId powerProtoRef) => GetPowerRecordByRef(powerProtoRef) != null;
-
-        public bool ContainsPowerProgressionPower(PrototypeId powerProtoRef)
+        public bool ContainsPower(PrototypeId powerProtoRef, bool excludeNonPowerProgressionPowers = false)
         {
             PowerCollectionRecord record = GetPowerRecordByRef(powerProtoRef);
-            return record != null && record.IsPowerProgressionPower;
+            return record != null && (excludeNonPowerProgressionPowers == false || record.IsPowerProgressionPower);
         }
 
-        public Power AssignPower(PrototypeId powerProtoRef, PowerIndexProperties indexProps, PrototypeId triggeringPowerRef = PrototypeId.Invalid, bool sendPowerAssignmentToClients = true)
+        public Power AssignPower(PrototypeId powerProtoRef, in PowerIndexProperties indexProps, PrototypeId triggeringPowerRef = PrototypeId.Invalid, bool sendPowerAssignmentToClients = true)
         {
             var powerProto = powerProtoRef.As<PowerPrototype>();
             if (powerProto == null) return Logger.WarnReturn<Power>(null, "AssignPower(): powerProto == null");
@@ -302,7 +301,7 @@ namespace MHServerEmu.Games.Entities.PowerCollections
             return record;
         }
 
-        private Power AssignPowerInternal(PrototypeId powerProtoRef, PowerIndexProperties indexProps, PrototypeId triggeringPowerRef, bool sendPowerAssignmentToClients)
+        private Power AssignPowerInternal(PrototypeId powerProtoRef, in PowerIndexProperties indexProps, PrototypeId triggeringPowerRef, bool sendPowerAssignmentToClients)
         {
             // Do pre-assignment validation, this check combines and inlines PowerCollection::preAssignPowerInternal() and PowerCollection::validatePowerData()
             if (GameDatabase.DataDirectory.PrototypeIsApproved(powerProtoRef) == false)
@@ -409,7 +408,7 @@ namespace MHServerEmu.Games.Entities.PowerCollections
             return powerRecord.Power;
         }
 
-        private PowerCollectionRecord CreatePowerRecord(PrototypeId powerProtoRef, PowerIndexProperties indexProps, PrototypeId triggeringPowerRef,
+        private PowerCollectionRecord CreatePowerRecord(PrototypeId powerProtoRef, in PowerIndexProperties indexProps, PrototypeId triggeringPowerRef,
             bool isAvatarPowerProgressionPower, bool isTeamUpPassivePowerWhileAway)
         {
             Power power = CreatePower(powerProtoRef, indexProps, triggeringPowerRef, isTeamUpPassivePowerWhileAway);
@@ -424,7 +423,7 @@ namespace MHServerEmu.Games.Entities.PowerCollections
             return record;
         }
 
-        private Power CreatePower(PrototypeId powerProtoRef, PowerIndexProperties indexProps, PrototypeId triggeringPowerRef, bool isTeamUpPassivePowerWhileAway)
+        private Power CreatePower(PrototypeId powerProtoRef, in PowerIndexProperties indexProps, PrototypeId triggeringPowerRef, bool isTeamUpPassivePowerWhileAway)
         {
             if (powerProtoRef == PrototypeId.Invalid) return Logger.WarnReturn<Power>(null, "CreatePower(): powerProtoRef == PrototypeId.Invalid");
             if (_owner == null) return Logger.WarnReturn<Power>(null, "CreatePower(): _owner == null");
@@ -466,8 +465,10 @@ namespace MHServerEmu.Games.Entities.PowerCollections
             }
 
             AssignTriggeredPowers(power);
-            _owner.OnPowerAssigned(power);
+
+            // NOTE: The client calls OnPowerAssigned before OnAssign, but then auto-activated powers do not get their keywords mask. If this a bug?
             power.OnAssign();
+            _owner.OnPowerAssigned(power);
         }
 
         private bool AssignTriggeredPowers(Power power)
@@ -493,7 +494,7 @@ namespace MHServerEmu.Games.Entities.PowerCollections
                 power.Properties[PropertyEnum.CombatLevel], power.Properties[PropertyEnum.ItemLevel]);
 
             int assignedPowers = 0;
-            List<PrototypeId> triggeredPowerRefList = new();    // NOTE: We reuse the same list for all iterations intead of allocating a new one each time
+            List<PrototypeId> triggeredPowerRefList = ListPool<PrototypeId>.Instance.Get();    // NOTE: We reuse the same list for all iterations
 
             foreach (PowerEventActionPrototype triggeredPowerEventProto in powerProto.ActionsTriggeredOnPowerEvent)
             {
@@ -587,12 +588,16 @@ namespace MHServerEmu.Games.Entities.PowerCollections
                     //Logger.Trace($"AssignTriggeredPowers(): {GameDatabase.GetPrototypeName(triggeredPowerRef)} for {powerProto}");
 
                     if (AssignPower(triggeredPowerRef, indexProps, powerProtoRef, false) == null)
+                    {
+                        ListPool<PrototypeId>.Instance.Return(triggeredPowerRefList);
                         return Logger.WarnReturn(false, "AssignTriggeredPowers(): AssignPower() == null");
+                    }
                 }
 
                 triggeredPowerRefList.Clear();
             }
 
+            ListPool<PrototypeId>.Instance.Return(triggeredPowerRefList);
             return true;
         }
 
@@ -694,7 +699,7 @@ namespace MHServerEmu.Games.Entities.PowerCollections
             if (powerProto.ActionsTriggeredOnPowerEvent.IsNullOrEmpty())
                 return true;
 
-            List<PrototypeId> triggeredPowerRefList = new();    // NOTE: We reuse the same list for all iterations intead of allocating a new one each time
+            List<PrototypeId> triggeredPowerRefList = ListPool<PrototypeId>.Instance.Get();    // NOTE: We reuse the same list for all iterations
 
             foreach (PowerEventActionPrototype triggeredPowerEventProto in powerProto.ActionsTriggeredOnPowerEvent)
             {
@@ -790,6 +795,7 @@ namespace MHServerEmu.Games.Entities.PowerCollections
                 triggeredPowerRefList.Clear();
             }
 
+            ListPool<PrototypeId>.Instance.Return(triggeredPowerRefList);
             return true;
         }
     }

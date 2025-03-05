@@ -53,31 +53,32 @@ namespace MHServerEmu.Games.GameData.Prototypes
     [AssetEnum]
     public enum OmegaPageType
     {
-        Psionics = 12,
+        NeuralEnhancement = 0,
         CosmicEntities = 1,
         ArcaneAttunement = 2,
         InterstellarExploration = 3,
         SpecialWeapons = 4,
         ExtraDimensionalTravel = 5,
-        MolecularAdjustment = 13,
+        Xenobiology = 6,
         RadioactiveOrigins = 7,
         TemporalManipulation = 8,
         Nanotechnology = 9,
         SupernaturalInvestigation = 10,
         HumanAugmentation = 11,
-        NeuralEnhancement = 0,
-        Xenobiology = 6,
+        Psionics = 12,
+        MolecularAdjustment = 13,
     }
 
     [AssetEnum((int)None)]
     public enum InfinityGem
     {
-        Soul = 3,
-        Time = 5,
-        Space = 4,
         Mind = 0,
-        Reality = 2,
         Power = 1,
+        Reality = 2,
+        Soul = 3,
+        Space = 4,
+        Time = 5,
+        NumGems = 6,
         None = 7,
     }
 
@@ -135,6 +136,9 @@ namespace MHServerEmu.Games.GameData.Prototypes
         public virtual bool HasBonusPropertiesToApply { get => Properties != null || PropertyEntries != null; }
 
         [DoNotCopy]
+        public bool IsPetTechAffix { get => Position >= AffixPosition.PetTech1 && Position <= AffixPosition.PetTech5; }
+
+        [DoNotCopy]
         public bool IsGemAffix { get => Position >= AffixPosition.Socket1 && Position <= AffixPosition.Socket3; }
 
         public override void PostProcess()
@@ -162,7 +166,7 @@ namespace MHServerEmu.Games.GameData.Prototypes
             return KeywordPrototype.TestKeywordBit(_categoryKeywordsMask, affixCategoryProto);
         }
 
-        public AffixCategoryPrototype GetFirstCategoryMatch(IEnumerable<AffixCategoryPrototype> affixCategoryProtos)
+        public AffixCategoryPrototype GetFirstCategoryMatch(AffixCategoryPrototype[] affixCategoryProtos)
         {
             foreach (AffixCategoryPrototype affixCategoryProto in affixCategoryProtos)
             {
@@ -173,9 +177,9 @@ namespace MHServerEmu.Games.GameData.Prototypes
             return null;
         }
 
-        public bool HasAnyCategory(IEnumerable<AffixCategoryPrototype> affixCategoryProtos)
+        public bool HasAnyCategory(AffixCategoryPrototype[] affixCategoryProtos)
         {
-            if (affixCategoryProtos == null || affixCategoryProtos.Any() == false)
+            if (affixCategoryProtos.IsNullOrEmpty())
                 return true;
 
             return GetFirstCategoryMatch(affixCategoryProtos) != null;
@@ -195,9 +199,9 @@ namespace MHServerEmu.Games.GameData.Prototypes
             return true;
         }
 
-        public bool HasKeywords(IEnumerable<AssetId> keywordsToCheck, bool hasAll = false)
+        public bool HasKeywords(AssetId[] keywordsToCheck, bool hasAll = false)
         {
-            if (keywordsToCheck == null || keywordsToCheck.Any() == false)
+            if (keywordsToCheck.IsNullOrEmpty())
                 return true;
 
             if (Keywords.IsNullOrEmpty())
@@ -284,9 +288,14 @@ namespace MHServerEmu.Games.GameData.Prototypes
             if (RequiredRegion != PrototypeId.Invalid && region.PrototypeDataRef == RequiredRegion)
                 return true;
 
-            if (RequiredRegionKeywords.HasValue())
+            if (RequiredRegionKeywords.HasValue() && region.HasKeywords())
             {
-                Logger.Warn("MatchesRegion(): Keyword region matching is not yet implemented");
+                // Seems to be deprecated in 1.52, but may be useful for older versions
+                foreach (PrototypeId keywordProtoRef in RequiredRegionKeywords)
+                {
+                    if (region.HasKeyword(keywordProtoRef.As<KeywordPrototype>()))
+                        return true;
+                }
             }
 
             return false;
@@ -361,6 +370,22 @@ namespace MHServerEmu.Games.GameData.Prototypes
         //---
 
         private static readonly Logger Logger = LogManager.CreateLogger();
+
+        public int GetRanksMax()
+        {
+            Curve curve = RankCostCurve.AsCurve();
+
+            if (RanksMax > 0 && curve != null)
+                return Math.Min(curve.MaxPosition, RanksMax);
+
+            if (RanksMax > 0)
+                return RanksMax;
+
+            if (curve != null)
+                return curve.MaxPosition;
+
+            return 0;
+        }
 
         public void RunEvalOnCreate(Entity entity, PropertyCollection indexProperties, PropertyCollection modProperties)
         {
@@ -505,6 +530,9 @@ namespace MHServerEmu.Games.GameData.Prototypes
 
         [DoNotCopy]
         public bool IsRankBoss { get => Rank == Rank.Boss || Rank == Rank.GroupBoss; }
+
+        [DoNotCopy]
+        public bool IsRankChampionOrEliteOrMiniBoss { get => Rank == Rank.Champion || Rank == Rank.Elite || Rank == Rank.MiniBoss; }
 
         [DoNotCopy]
         public bool IsRankBossOrMiniBoss { get => IsRankBoss || Rank == Rank.MiniBoss; }

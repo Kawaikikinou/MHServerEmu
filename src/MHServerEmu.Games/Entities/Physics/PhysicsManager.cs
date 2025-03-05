@@ -1,4 +1,5 @@
 ﻿using MHServerEmu.Core.Collisions;
+using MHServerEmu.Core.Memory;
 using MHServerEmu.Core.VectorMath;
 using MHServerEmu.Games.Common;
 using MHServerEmu.Games.Entities.Locomotion;
@@ -140,7 +141,9 @@ namespace MHServerEmu.Games.Entities.Physics
         private void UpdateAttachedEntityPositions(PhysicsContext physicsContext, WorldEntity parentEntity)
         {
             if (parentEntity == null) return;
-            if (parentEntity.Physics.GetAttachedEntities(out ulong[] attachedEntities))
+
+            List<ulong> attachedEntities = ListPool<ulong>.Instance.Get();
+            if (parentEntity.Physics.GetAttachedEntities(attachedEntities))
             {
                 Vector3 parentEntityPosition = parentEntity.RegionLocation.Position;
                 Orientation parentEntityOrientation = parentEntity.Orientation;
@@ -165,6 +168,7 @@ namespace MHServerEmu.Games.Entities.Physics
                     }
                 }
             }
+            ListPool<ulong>.Instance.Return(attachedEntities);
         }
 
         private void ApplyForceSystems()
@@ -190,7 +194,7 @@ namespace MHServerEmu.Games.Entities.Physics
 
                 WorldEntity entity = entityManager.GetEntity<WorldEntity>(member.EntityId);
                 if (entity != null && entity.IsInWorld)
-                    if (entity.TestStatus(EntityStatus.Destroyed))
+                    if (entity.TestStatus(EntityStatus.Destroyed) == false)
                     {
                         float deltaTime = Math.Min((float)_game.FixedTimeBetweenUpdates.TotalSeconds, member.Time);
                         float distance = member.Speed * deltaTime + member.Acceleration * deltaTime * deltaTime / 2;
@@ -346,8 +350,8 @@ namespace MHServerEmu.Games.Entities.Physics
                         Vector3? resultNormal = Vector3.ZAxis;
                         if (bounds.Sweep(otherBounds, Vector3.Zero, velocity, ref time, ref resultNormal) == false) continue;
                         Vector3 normal = resultNormal.Value;
-                        velocity *= time;
-                        EntityCollision entityCollision = new (otherEntity, time, location.Position + velocity, normal);
+                        Vector3 collisionPosition = location.Position + velocity * time;
+                        EntityCollision entityCollision = new (otherEntity, time, collisionPosition, normal);
                         entityCollisionList.Add(entityCollision);
 
                         if (entity.CanBeBlockedBy(otherEntity))
@@ -502,7 +506,7 @@ namespace MHServerEmu.Games.Entities.Physics
                     bool overlapped = who.CanCollideWith(whom);
                     if (overlappedEntity.Overlapped != overlapped)
                     {
-                        overlappedEntity.Overlapped = overlapped;
+                        who.Physics.OverlappedEntities[whom.Id] = new(overlapped, overlappedEntity.Frame);
                         if (overlapped)
                             NotifyEntityOverlapBegin(who, whom, whoPos, whomPos);
                         else
@@ -571,9 +575,10 @@ namespace MHServerEmu.Games.Entities.Physics
 
         private void UpdateOverlapEntryHelper(EntityPhysics entityPhysics, WorldEntity otherEntity)
         {
-            if (entityPhysics.OverlappedEntities.TryAdd(otherEntity.Id, new()))
+            if (entityPhysics.OverlappedEntities.TryGetValue(otherEntity.Id, out var entry) == false)
                 RegisterEntityForPendingPhysicsResolve(entityPhysics.Entity);
-            entityPhysics.OverlappedEntities[otherEntity.Id].Frame = _physicsFrames;
+
+            entityPhysics.OverlappedEntities[otherEntity.Id] = new(entry.Overlapped, _physicsFrames);
         }
 
         private static void ApplyRepulsionForces(WorldEntity entity, WorldEntity otherEntity)
@@ -647,6 +652,49 @@ namespace MHServerEmu.Games.Entities.Physics
             }
         }
 
+        public void AddKnockbackForce(WorldEntity entity, Vector3 position, float time, float speed, float acceleration)
+        {
+            ForceSystem pendingForce = GetPendingForceSystem(position);
+            var epicenter = pendingForce.Epicenter;
+
+            var member = new ForceSystemMember
+            {
+                EntityId = entity.Id,
+                Position = entity.RegionLocation.Position,
+                Time = time,
+                Speed = speed,
+                Acceleration = acceleration
+            };
+
+            var direction = (member.Position - epicenter).To2D();
+            if (Vector3.IsNearZero(direction))
+                member.Direction = entity.Forward;
+            else
+                member.Direction = Vector3.Normalize(direction);
+
+            float distanceSq = Vector3.DistanceSquared(epicenter, member.Position);
+            var pendingMembers = pendingForce.Members;
+
+            foreach (var pendingMember in pendingMembers.Iterate())
+                if (distanceSq > Vector3.DistanceSquared(epicenter, pendingMember.Position))
+                {
+                    pendingForce.Members.InsertBefore(member, pendingMember);
+                    break;
+                }
+
+            if (pendingMembers.Contains(member) == false) pendingMembers.AddBack(member);
+        }
+
+        private ForceSystem GetPendingForceSystem(Vector3 position)
+        {
+            foreach (var pendingForce in _pendingForceSystems)
+                if (Vector3.EpsilonSphereTest(pendingForce.Epicenter, position, 0.1f)) 
+                    return pendingForce;
+
+            ForceSystem newForce = new(position);
+            _pendingForceSystems.Add(newForce);
+            return newForce;
+        }
     }
 
     [Flags]

@@ -45,7 +45,6 @@ namespace MHServerEmu.Games.Entities
 
         private readonly Dictionary<ulong, Entity> _entityDict = new();
         private readonly Dictionary<ulong, Entity> _entityDbGuidDict = new();
-        private readonly HashSet<Player> _players = new();
         private readonly HashSet<ulong> _entitiesPendingCondemnedPowerDeletion = new();
         private readonly LinkedList<ulong> _entitiesPendingDestruction = new();     // NOTE: Change this to a regular List<ulong> if this causes GC issues
 
@@ -55,14 +54,21 @@ namespace MHServerEmu.Games.Entities
         private ulong GetNextEntityId() { return _nextEntityId++; }
         public ulong PeekNextEntityId() { return _nextEntityId; }
 
+        public int EntityCount { get => _entityDict.Count; }
+        public int PlayerCount { get => Players.Count; }
+
         public bool IsDestroyingAllEntities { get; private set; } = false;
 
-        public IEnumerable<Player> Players { get => _players; }
+        // NOTE: We break encapsulation here to allow the PlayerIterator to access this HashSet's struct enumerator and avoid boxing.
+        // As an alternative, we could also move PlayerIterator to EntityManager as a nested struct.
+        public HashSet<Player> Players { get; } = new();
 
         public PhysicsManager PhysicsManager { get; set; }
         public EntityInvasiveCollection AllEntities { get; private set; }
         public EntityInvasiveCollection SimulatedEntities { get; private set; }
         public EntityInvasiveCollection LocomotionEntities { get; private set; }
+
+        public bool IsAIEnabled { get; private set; } = true;
 
         public EntityManager(Game game)
         {            
@@ -167,7 +173,6 @@ namespace MHServerEmu.Games.Entities
                 }
             }
 
-            // TODO: Apply replication state
             entity.ApplyInitialReplicationState(ref settings);
 
             // Finish deserialization
@@ -313,7 +318,7 @@ namespace MHServerEmu.Games.Entities
         public bool AddPlayer(Player player)
         {
             if (player == null) return Logger.WarnReturn(false, "AddPlayer(): player == null");
-            bool playerAdded = _players.Add(player);
+            bool playerAdded = Players.Add(player);
             if (playerAdded == false) Logger.Warn($"AddPlayer(): Failed to add player {player}");
             return playerAdded;
         }
@@ -321,7 +326,7 @@ namespace MHServerEmu.Games.Entities
         public bool RemovePlayer(Player player)
         {
             if (player == null) return Logger.WarnReturn(false, "RemovePlayer(): player == null");
-            bool playerRemoved = _players.Remove(player);
+            bool playerRemoved = Players.Remove(player);
             if (playerRemoved == false) Logger.Warn($"RemovePlayer(): Failed to remove player {player}");
             return playerRemoved;
         }
@@ -467,17 +472,14 @@ namespace MHServerEmu.Games.Entities
             if (_game == null) return Logger.WarnReturn(false, "ProcessDestroyed(): _game == null");
 
             // Delete all destroyed entities
-            while (_entitiesPendingDestruction.Any())
+            while (_entitiesPendingDestruction.Count > 0)
             {
                 ulong entityId = _entitiesPendingDestruction.First.Value;
 
-                if (_entityDict.TryGetValue(entityId, out Entity entity) == false)
-                    Logger.Warn($"ProcessDestroyed(): Failed to get entity for enqueued id {entityId}");
-                else
-                {
-                    //Logger.Trace($"Deleting entity {entity}");
+                if (_entityDict.TryGetValue(entityId, out Entity entity))
                     DeleteEntity(entity);
-                }
+                else
+                    Logger.Warn($"ProcessDestroyed(): Failed to get entity for enqueued id {entityId}");
 
                 _entitiesPendingDestruction.RemoveFirst();
             }
@@ -504,6 +506,20 @@ namespace MHServerEmu.Games.Entities
             _entityDict.Remove(entity.Id);
             entity.OnDeallocate();
             return true;
+        }
+
+        public void EnableAI(bool enable)
+        {
+            if (IsAIEnabled == enable) return;
+            IsAIEnabled = enable;
+
+            if (enable)
+                foreach (var entity in SimulatedEntities.Iterate())
+                    if (entity is Agent agent) agent.AIController?.SetIsEnabled(true);
+
+            foreach (var entity in _entityDict.Values)
+                if (entity is WorldEntity worldEntity && entity is not Missile && worldEntity.IsInWorld)
+                    worldEntity.Locomotor?.Stop();
         }
     }
 }

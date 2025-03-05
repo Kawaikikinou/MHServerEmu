@@ -2,14 +2,9 @@
 
 namespace MHServerEmu.Core.Collections
 {
+    // TODO: IPoolable
     public class Picker<T>
     {
-        public class WeightedElement
-        {
-            public T Element { get; }
-            public int Weight { get; }
-            public WeightedElement(T element, int weight) { Element = element; Weight = weight; }
-        }
         enum WeightMode
         {
             Invalid,
@@ -18,9 +13,15 @@ namespace MHServerEmu.Core.Collections
         }
 
         private readonly List<WeightedElement> _elements;
-        private readonly GRandom _random;
+
+        private GRandom _random;
         private WeightMode _weightMode;
         private int _weights;        
+
+        public Picker()
+        {
+            _elements = new();
+        }
 
         public Picker(GRandom random)
         {
@@ -32,10 +33,24 @@ namespace MHServerEmu.Core.Collections
 
         public Picker(Picker<T> other)
         {
-            _elements = new(other._elements);
-            _random = new(other._random.GetSeed());
+            _elements = new(other._elements.Count);
+            foreach (WeightedElement element in other._elements)
+                _elements.Add(element);
+
+            // IMPORTANT: The copy needs to use the same instance of random as the original to preserve the RNG sequence,
+            // otherwise PickValidItem() and PickWeightTryAll() will keep picking the same things.
+            _random = other._random;
+
             _weightMode = other._weightMode;
             _weights = other._weights;
+        }
+
+        public void Initialize(GRandom random)
+        {
+            _elements.Clear();
+            _random = random;
+            _weightMode = WeightMode.Invalid;
+            _weights = 0;
         }
 
         public void Add(T element)
@@ -169,7 +184,19 @@ namespace MHServerEmu.Core.Collections
 
         public void Clear()
         {
-            _elements.Clear(); _weights = 0;
+            _elements.Clear();
+            _weights = 0;
+        }
+
+        private class WeightedElement
+        {
+            public T Element { get; }
+            public int Weight { get; }
+            public WeightedElement(T element, int weight)
+            {
+                Element = element;
+                Weight = weight;
+            }
         }
     }
 }

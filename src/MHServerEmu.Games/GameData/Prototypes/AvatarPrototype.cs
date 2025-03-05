@@ -6,6 +6,7 @@ using MHServerEmu.Games.Entities.Inventories;
 using MHServerEmu.Games.GameData.Calligraphy.Attributes;
 using MHServerEmu.Games.GameData.LiveTuning;
 using MHServerEmu.Games.Powers;
+using MHServerEmu.Games.Properties;
 
 namespace MHServerEmu.Games.GameData.Prototypes
 {
@@ -66,6 +67,11 @@ namespace MHServerEmu.Games.GameData.Prototypes
         [DoNotCopy]
         public override int LiveTuneEternitySplinterCost { get => (int)LiveTuningManager.GetLiveAvatarTuningVar(this, AvatarEntityTuningVar.eAETV_EternitySplinterPrice); }
 
+        [DoNotCopy]
+        public PrimaryResourceManaBehaviorPrototype[] PrimaryResourceBehaviorsCache { get; private set; }
+        [DoNotCopy]
+        public SecondaryResourceManaBehaviorPrototype SecondaryResourceBehaviorCache { get; private set; }
+
         public override bool ApprovedForUse()
         {
             if (base.ApprovedForUse() == false) return false;
@@ -118,6 +124,21 @@ namespace MHServerEmu.Games.GameData.Prototypes
             // TODO: StealablePowersAllowed
 
             AvatarPrototypeEnumValue = GetEnumValueFromBlueprint(LiveTuningData.GetAvatarBlueprintDataRef());
+
+            // Validate and cache resource behaviors
+            if (PrimaryResourceBehaviors.HasValue())
+            {
+                PrimaryResourceBehaviorsCache = new PrimaryResourceManaBehaviorPrototype[PrimaryResourceBehaviors.Length];
+                for (int i = 0; i < PrimaryResourceBehaviors.Length; i++)
+                    PrimaryResourceBehaviorsCache[i] = PrimaryResourceBehaviors[i].As<PrimaryResourceManaBehaviorPrototype>();
+            }
+            else
+            {
+                Logger.Warn($"PostProcess(): [{this}] does not have primary resource behaviors defined");
+            }
+
+            // Not having a secondary resource is valid for avatars
+            SecondaryResourceBehaviorCache = SecondaryResourceBehavior.As<SecondaryResourceManaBehaviorPrototype>();
         }
 
         /// <summary>
@@ -136,35 +157,56 @@ namespace MHServerEmu.Games.GameData.Prototypes
             return StartingCostume.Item;
         }
 
+        public AssetId GetStartingCostumeAssetRef(Platforms platform)
+        {
+            PrototypeId costumeProtoRef = GetStartingCostumeForPlatform(platform);
+            if (costumeProtoRef == PrototypeId.Invalid)
+                Logger.Warn("GetStartingCostumeAssetRef(): costumeProtoRef == PrototypeId.Invalid");
+
+            CostumePrototype startingCostumeProto = costumeProtoRef.As<CostumePrototype>();
+            if (startingCostumeProto == null) return Logger.WarnReturn(AssetId.Invalid, "GetStartingCostumeAssetRef(): startingCostumeProto == null");
+
+            return startingCostumeProto.CostumeUnrealClass;
+        }
+
         /// <summary>
         /// Retrieves <see cref="PowerProgressionEntryPrototype"/> instances for powers that would be unlocked at the specified level or level range.
         /// </summary>
-        public IEnumerable<PowerProgressionEntryPrototype> GetPowersUnlockedAtLevel(int level = -1, bool retrieveForLevelRange = false, int startingLevel = -1)
+        public bool GetPowersUnlockedAtLevel(List<PowerProgressionEntryPrototype> powerProgEntryList, int level = -1, bool retrieveForLevelRange = false, int startingLevel = -1)
         {
-            if (PowerProgressionTables == null) yield break;
+            if (PowerProgressionTables.IsNullOrEmpty())
+                return false;
 
             foreach (PowerProgressionTablePrototype table in PowerProgressionTables)
             {
-                if (table.PowerProgressionEntries == null) continue;
+                if (table.PowerProgressionEntries.IsNullOrEmpty())
+                    continue;
 
-                foreach (PowerProgressionEntryPrototype entry in table.PowerProgressionEntries)
+                foreach (PowerProgressionEntryPrototype powerProgEntry in table.PowerProgressionEntries)
                 {
-                    if (entry.PowerAssignment == null) continue;
-                    if (entry.PowerAssignment.Ability == PrototypeId.Invalid) continue;
-
-                    bool match = true;
+                    AbilityAssignmentPrototype abilityAssignmentProto = powerProgEntry.PowerAssignment;
+                    if (abilityAssignmentProto == null)
+                    {
+                        Logger.Warn("GetPowersUnlockedAtLevel(): abilityAssignmentProto == null");
+                        continue;
+                    }
 
                     // If the specified level is set to -1 it means we need to include all levels.
-                    match &= level < 0 || entry.Level <= level;
 
                     // retrieveForLevelRange means to retrieve all abilities that would be unlocked
                     // if you got from startingLevel to level. Otherwise retrieve just the abilities
                     // for the specified level.
-                    match &= retrieveForLevelRange && entry.Level > startingLevel || entry.Level == level;
 
-                    if (match) yield return entry;
+                    if (abilityAssignmentProto.Ability != PrototypeId.Invalid &&
+                        (level < 0 || level >= powerProgEntry.Level) &&
+                        ((retrieveForLevelRange && powerProgEntry.Level > startingLevel) || powerProgEntry.Level == level))
+                    {
+                        powerProgEntryList.Add(powerProgEntry);
+                    }
                 }
             }
+
+            return powerProgEntryList.Count > 0;
         }
 
         /// <summary>
@@ -338,6 +380,31 @@ namespace MHServerEmu.Games.GameData.Prototypes
         public int IntelligenceValue { get; protected set; }
         public int SpeedValue { get; protected set; }
         public int StrengthValue { get; protected set; }
+
+        //---
+
+        public bool TryUpdateStats(PropertyCollection properties)
+        {
+            bool TryUpdateStatHelper(PropertyEnum statProperty, int statValue)
+            {
+                if (statValue > 0 && properties[statProperty] != statValue)
+                {
+                    properties[statProperty] = statValue;
+                    return true;
+                }
+
+                return false;
+            }
+
+            bool statsChanged = false;
+            statsChanged |= TryUpdateStatHelper(PropertyEnum.StatDurability, DurabilityValue);
+            statsChanged |= TryUpdateStatHelper(PropertyEnum.StatStrength, StrengthValue);
+            statsChanged |= TryUpdateStatHelper(PropertyEnum.StatFightingSkills, FightingSkillsValue);
+            statsChanged |= TryUpdateStatHelper(PropertyEnum.StatSpeed, SpeedValue);
+            statsChanged |= TryUpdateStatHelper(PropertyEnum.StatEnergyProjection, EnergyProjectionValue);
+            statsChanged |= TryUpdateStatHelper(PropertyEnum.StatIntelligence, IntelligenceValue);
+            return statsChanged;
+        }
     }
 
     public class PowerProgressionEntryPrototype : ProgressionEntryPrototype

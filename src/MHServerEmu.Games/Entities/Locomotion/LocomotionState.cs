@@ -1,5 +1,8 @@
 ﻿using System.Text;
+using MHServerEmu.Core.Extensions;
+using MHServerEmu.Core.Helpers;
 using MHServerEmu.Core.Logging;
+using MHServerEmu.Core.Memory;
 using MHServerEmu.Core.Serialization;
 using MHServerEmu.Core.VectorMath;
 using MHServerEmu.Games.Common;
@@ -47,7 +50,7 @@ namespace MHServerEmu.Games.Entities.Locomotion
     /// <summary>
     /// Represents state of a <see cref="Locomotor"/>.
     /// </summary>
-    public class LocomotionState
+    public class LocomotionState : IPoolable, IDisposable
     {
         // TODO: For optimization reasons it may be a good idea to change this to a struct.
         // However, it is going to be large + mutable + have a reference type as one of its
@@ -66,6 +69,8 @@ namespace MHServerEmu.Games.Entities.Locomotion
         public float FollowEntityRangeEnd { get; set; }
         public int PathGoalNodeIndex { get; set; }
         public List<NaviPathNode> PathNodes { get; set; } = new();
+
+        public bool IsInPool { get; set; }
 
         public LocomotionState() { }
 
@@ -87,9 +92,25 @@ namespace MHServerEmu.Games.Entities.Locomotion
 
             // NOTE: Is it okay to add path nodes here by reference? Do we need a copy?
             // Review this if/when we change NaviPathNode to struct.
-            //PathNodes = new(other.PathNodes);
+            PathNodes.Set(other.PathNodes);
+        }
+
+        public void ResetForPool()
+        {
+            LocomotionFlags = default;
+            Method = LocomotorMethod.Default;
+            BaseMoveSpeed = default;
+            Height = default;
+            FollowEntityId = default;
+            FollowEntityRangeStart = default;
+            FollowEntityRangeEnd = default;
+            PathGoalNodeIndex = default;
             PathNodes.Clear();
-            PathNodes.AddRange(other.PathNodes);
+        }
+
+        public void Dispose()
+        {
+            ObjectPoolManager.Instance.Return(this);
         }
 
         public override string ToString()
@@ -124,7 +145,7 @@ namespace MHServerEmu.Games.Entities.Locomotion
             success &= Serializer.TransferVectorFixed(archive, ref offset, 3);
 
             // Pack vertex side + radius into a single value
-            int vertexSideRadius = (int)MathF.Round(pathNode.Radius);
+            int vertexSideRadius = MathHelper.RoundUpToInt(pathNode.Radius);
             if (pathNode.VertexSide == NaviSide.Left) vertexSideRadius = -vertexSideRadius;
             success &= Serializer.Transfer(archive, ref vertexSideRadius);
 

@@ -8,12 +8,14 @@
         /// <summary>
         /// Constructs a new <see cref="ConsoleTarget"/> instance with the specified parameters.
         /// </summary>
-        public ConsoleTarget(bool includeTimestamps, LoggingLevel minimumLevel, LoggingLevel maximumLevel) : base(includeTimestamps, minimumLevel, maximumLevel) { }
+        public ConsoleTarget(LogTargetSettings settings) : base(settings)
+        {
+        }
 
         /// <summary>
         /// Outputs a <see cref="LogMessage"/> instance to the <see cref="Console"/>.
         /// </summary>
-        public override void ProcessLogMessage(LogMessage message)
+        public override void ProcessLogMessage(in LogMessage message)
         {
             SetForegroundColor(message.Level);
             Console.WriteLine(message.ToString(IncludeTimestamps));

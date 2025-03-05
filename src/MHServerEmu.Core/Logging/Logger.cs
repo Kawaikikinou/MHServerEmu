@@ -1,15 +1,7 @@
-﻿namespace MHServerEmu.Core.Logging
-{
-    public enum LoggingLevel
-    {
-        Trace,
-        Debug,
-        Info,
-        Warn,
-        Error,
-        Fatal
-    }
+﻿using System.Runtime.CompilerServices;
 
+namespace MHServerEmu.Core.Logging
+{
     /// <summary>
     /// Provides logging capabilities.
     /// </summary>
@@ -30,32 +22,80 @@
         /// <summary>
         /// Logs a <see cref="LoggingLevel.Trace"/> message.
         /// </summary>
-        public void Trace(string message) => Log(LoggingLevel.Trace, message);
+        public void Trace(string message, LogChannels channels = LogChannels.General, LogCategory category = LogCategory.Common)
+        {
+            Log(LoggingLevel.Trace, message, channels, category);
+        }
+
+        public void Trace(string message, LogCategory category)
+        {
+            Log(LoggingLevel.Trace, message, LogChannels.General, category);
+        }
 
         /// <summary>
         /// Logs a <see cref="LoggingLevel.Debug"/> message.
         /// </summary>
-        public void Debug(string message) => Log(LoggingLevel.Debug, message);
+        public void Debug(string message, LogChannels channels = LogChannels.General, LogCategory category = LogCategory.Common)
+        {
+            Log(LoggingLevel.Debug, message, channels, category);
+        }
+
+        public void Debug(string message, LogCategory category)
+        {
+            Log(LoggingLevel.Debug, message, LogChannels.General, category);
+        }
 
         /// <summary>
         /// Logs a <see cref="LoggingLevel.Info"/> message.
         /// </summary>
-        public void Info(string message) => Log(LoggingLevel.Info, message);
+        public void Info(string message, LogChannels channels = LogChannels.General, LogCategory category = LogCategory.Common)
+        {
+            Log(LoggingLevel.Info, message, channels, category);
+        }
+
+        public void Info(string message, LogCategory category)
+        {
+            Log(LoggingLevel.Info, message, LogChannels.General, category);
+        }
 
         /// <summary>
         /// Logs a <see cref="LoggingLevel.Warn"/> message.
         /// </summary>
-        public void Warn(string message) => Log(LoggingLevel.Warn, message);
+        public void Warn(string message, LogChannels channels = LogChannels.General, LogCategory category = LogCategory.Common)
+        {
+            Log(LoggingLevel.Warn, message, channels, category);
+        }
+
+        public void Warn(string message, LogCategory category)
+        {
+            Log(LoggingLevel.Warn, message, LogChannels.General, category);
+        }
 
         /// <summary>
         /// Logs a <see cref="LoggingLevel.Error"/> message.
         /// </summary>
-        public void Error(string message) => Log(LoggingLevel.Error, message);
+        public void Error(string message, LogChannels channels = LogChannels.General, LogCategory category = LogCategory.Common)
+        {
+            Log(LoggingLevel.Error, message, channels, category);
+        }
+
+        public void Error(string message, LogCategory category)
+        {
+            Log(LoggingLevel.Error, message, LogChannels.General, category);
+        }
 
         /// <summary>
         /// Logs a <see cref="LoggingLevel.Fatal"/> message.
         /// </summary>
-        public void Fatal(string message) => Log(LoggingLevel.Fatal, message);
+        public void Fatal(string message, LogChannels channels = LogChannels.All, LogCategory category = LogCategory.Common)
+        {
+            Log(LoggingLevel.Fatal, message, channels, category);
+        }
+
+        public void Fatal(string message, LogCategory category)
+        {
+            Log(LoggingLevel.Fatal, message, LogChannels.General, category);
+        }
 
         #endregion
 
@@ -130,16 +170,25 @@
         /// <summary>
         /// Logs a message on the specified <see cref="LoggingLevel"/>.
         /// </summary>
-        private void Log(LoggingLevel level, string message) => LogRouter.AddMessage(level, _name, message);
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private void Log(LoggingLevel level, string message, LogChannels channels = LogChannels.General, LogCategory category = LogCategory.Common)
+        {
+            LogRouter.AddMessage(level, _name, message, channels, category);
+        }
 
         /// <summary>
         /// Logs an exception on the specified level.
         /// </summary>
-        private void LogException(LoggingLevel level, string message, Exception exception) => Log(level, $"{message} - [Exception] {exception}");
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private void LogException(LoggingLevel level, string message, Exception exception)
+        {
+            Log(level, $"{message} - [Exception] {exception}");
+        }
 
         /// <summary>
         /// Logs a message on the specified <see cref="LoggingLevel"/> and returns <typeparamref name="T"/>.
         /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private T LogReturn<T>(LoggingLevel level, string message, T returnValue)
         {
             Log(level, message);

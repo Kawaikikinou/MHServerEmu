@@ -1,15 +1,21 @@
-﻿using MHServerEmu.Games.GameData.Calligraphy;
+﻿using MHServerEmu.Core.Extensions;
+using MHServerEmu.Core.Logging;
+using MHServerEmu.Core.Memory;
+using MHServerEmu.Games.Entities;
+using MHServerEmu.Games.GameData.Calligraphy;
 using MHServerEmu.Games.GameData.Calligraphy.Attributes;
 using MHServerEmu.Games.GameData.LiveTuning;
 using MHServerEmu.Games.Powers;
+using MHServerEmu.Games.Powers.Conditions;
 using MHServerEmu.Games.Properties;
+using MHServerEmu.Games.Properties.Evals;
 
 namespace MHServerEmu.Games.GameData.Prototypes
 {
     #region Enums
 
     [AssetEnum((int)Neither)]
-    public enum PowerConditionType
+    public enum ConditionType
     {
         Neither = 0,
         Buff = 1,
@@ -22,86 +28,6 @@ namespace MHServerEmu.Games.GameData.Prototypes
     {
         Target = 0,
         User = 1,
-    }
-
-    [AssetEnum((int)None)]
-    public enum ProcTriggerType
-    {
-        None = 0,
-        OnAnyHit = 1,
-        OnAnyHitForPctHealth = 2,
-        OnAnyHitTargetHealthBelowPct = 3,
-        OnBlock = 4,
-        OnCollide = 5,
-        OnCollideEntity = 6,
-        OnCollideWorldGeo = 7,
-        OnConditionEnd = 8,
-        OnConditionStackCount = 9,
-        OnCrit = 10,
-        OnDeath = 12,
-        OnEnduranceAbove = 14,
-        OnEnduranceBelow = 15,
-        OnDodge = 13,
-        OnGotAttacked = 16,
-        OnGotDamaged = 17,
-        OnGotDamagedPriorResist = 18,
-        OnGotDamagedByCrit = 11,
-        OnGotDamagedEnergy = 19,
-        OnGotDamagedEnergyPriorResist = 20,
-        OnGotDamagedForPctHealth = 21,
-        OnGotDamagedHealthBelowPct = 22,
-        OnGotDamagedMental = 23,
-        OnGotDamagedMentalPriorResist = 24,
-        OnGotDamagedPhysical = 25,
-        OnGotDamagedPhysicalPriorResist = 26,
-        OnGotDamagedBySuperCrit = 27,
-        OnHealthAbove = 28,
-        OnHealthAboveToggle = 29,
-        OnHealthBelow = 30,
-        OnHealthBelowToggle = 31,
-        OnInCombat = 32,
-        OnInteractedWith = 33,
-        OnInteractedWithOutOfUses = 34,
-        OnKillAlly = 35,
-        OnKillDestructible = 36,
-        OnKillOther = 37,
-        OnKillOtherCritical = 38,
-        OnKillOtherSuperCrit = 39,
-        OnKnockdownEnd = 40,
-        OnLifespanExpired = 41,
-        OnLootPickup = 42,
-        OnMovementStarted = 44,
-        OnMovementStopped = 45,
-        OnMissileAbsorbed = 43,
-        OnNegStatusApplied = 46,
-        OnOrbPickup = 47,
-        OnOutCombat = 48,
-        OnOverlapBegin = 49,
-        OnPetDeath = 50,
-        OnPetHit = 51,
-        OnPowerHit = 52,
-        OnPowerHitEnergy = 53,
-        OnPowerHitMental = 54,
-        OnPowerHitNormal = 55,
-        OnPowerHitNotOverTime = 56,
-        OnPowerHitPhysical = 57,
-        OnPowerUseComboEffect = 58,
-        OnPowerUseConsumable = 59,
-        OnPowerUseGameFunction = 60,
-        OnPowerUseNormal = 61,
-        OnPowerUseProcEffect = 62,
-        OnRunestonePickup = 63,
-        OnSecondaryResourceEmpty = 64,
-        OnSecondaryResourcePipGain = 65,
-        OnSecondaryResourcePipLoss = 66,
-        OnSecondaryResourcePipMax = 67,
-        OnSecondaryResourcePipZero = 68,
-        OnSkillshotReflect = 69,
-        OnSummonPet = 70,
-        OnSuperCrit = 71,
-        OnMissileHit = 72,
-        OnHotspotNegated = 73,
-        OnControlledEntityReleased = 74,
     }
 
     [AssetEnum]
@@ -139,7 +65,7 @@ namespace MHServerEmu.Games.GameData.Prototypes
         public ConditionScopeType Scope { get; protected set; }
         public AssetId UnrealClass { get; protected set; }
         public EvalPrototype ChanceToApplyCondition { get; protected set; }
-        public PowerConditionType ConditionType { get; protected set; }
+        public ConditionType ConditionType { get; protected set; }
         public bool VisualOnly { get; protected set; }
         public ConditionUnrealPrototype[] UnrealOverrides { get; protected set; }
         public PrototypeId[] Keywords { get; protected set; }
@@ -172,20 +98,26 @@ namespace MHServerEmu.Games.GameData.Prototypes
         public int UrgentTimeMS { get; protected set; }
         public AssetId IconPathHiRes { get; protected set; }
 
+        //---
+
+        private static readonly Logger Logger = LogManager.CreateLogger();
+
         [DoNotCopy]
         public KeywordsMask KeywordsMask { get; protected set; }
         [DoNotCopy]
-        public TimeSpan UpdateInterval { get => TimeSpan.FromMilliseconds(UpdateIntervalMS); }
+        public ConditionCancelOnFlags CancelOnFlags { get; private set; }
         [DoNotCopy]
-        public ConditionCancelOnFlags CancelOnFlags { get; private set; } = ConditionCancelOnFlags.None;
-        [DoNotCopy]
-        public bool IsHitReactCondition { get => Properties != null && Properties.HasProperty(PropertyEnum.HitReact); }
+        public PowerIndexPropertyFlags PowerIndexPropertyFlags { get; private set; }
 
         [DoNotCopy]
         public int BlueprintCopyNum { get; set; }
-
         [DoNotCopy]
         public int ConditionPrototypeEnumValue { get; private set; }
+
+        [DoNotCopy]
+        public TimeSpan UpdateInterval { get => TimeSpan.FromMilliseconds(UpdateIntervalMS); }
+        [DoNotCopy]
+        public bool IsHitReactCondition { get => Properties != null && Properties.HasProperty(PropertyEnum.HitReact); }
 
         public override void PostProcess()
         {
@@ -193,9 +125,7 @@ namespace MHServerEmu.Games.GameData.Prototypes
 
             KeywordsMask = KeywordPrototype.GetBitMaskForKeywordList(Keywords);
 
-            // TODO: stuff
-
-            // Combine cancel flags into a single bit field (TODO: flag enum)
+            // Combine cancel flags into a single bit field
             if (CancelOnHit)                    CancelOnFlags |= ConditionCancelOnFlags.OnHit;
             if (CancelOnKilled)                 CancelOnFlags |= ConditionCancelOnFlags.OnKilled;
             if (CancelOnPowerUse)               CancelOnFlags |= ConditionCancelOnFlags.OnPowerUse;
@@ -205,12 +135,184 @@ namespace MHServerEmu.Games.GameData.Prototypes
 
             ConditionPrototypeEnumValue = GetEnumValueFromBlueprint(LiveTuningData.GetConditionBlueprintDataRef());
 
-            // TODO: more stuff
+            // Find all index properties for this condition
+            HashSet<PropertyEnum> enumSet = HashSetPool<PropertyEnum>.Instance.Get();
+            List<PropertyId> evalPropertyIdList = ListPool<PropertyId>.Instance.Get();
+
+            // Duration
+            if (DurationMSCurve != CurveId.Invalid)
+            {
+                Curve durationCurve = DurationMSCurve.AsCurve();
+                if (durationCurve != null)
+                {
+                    if (durationCurve.IsCurveZero == false)
+                        enumSet.Add(GameDatabase.PropertyInfoTable.GetPropertyEnumFromPrototype(DurationMSCurveIndex));
+                }
+                else
+                {
+                    Logger.Warn("PostProcess(): durationCurve == null");
+                }
+            }
+
+            // Properties
+            Properties?.GetPropertyCurveIndexPropertyEnumValues(enumSet);
+
+            // Evals
+            if (ChanceToApplyCondition != null)
+                Eval.GetEvalPropertyIds(ChanceToApplyCondition, evalPropertyIdList, GetEvalPropertyIdEnum.Input, null);
+
+            if (DurationMSEval != null)
+                Eval.GetEvalPropertyIds(DurationMSEval, evalPropertyIdList, GetEvalPropertyIdEnum.Input, null);
+
+            if (EvalOnCreate.HasValue())
+            {
+                foreach (EvalPrototype evalOnCreate in EvalOnCreate)
+                    Eval.GetEvalPropertyIds(evalOnCreate, evalPropertyIdList, GetEvalPropertyIdEnum.Input, null);
+            }
+
+            if (EvalPartyBoost.HasValue())
+            {
+                foreach (EvalPrototype evalPartyBoost in EvalPartyBoost)
+                    Eval.GetEvalPropertyIds(evalPartyBoost, evalPropertyIdList, GetEvalPropertyIdEnum.Input, null);
+            }
+
+            // Convert found enums to flags
+            foreach (PropertyId propertyId in evalPropertyIdList)
+                enumSet.Add(propertyId.Enum);
+
+            foreach (PropertyEnum propertyEnum in enumSet)
+            {
+                switch (propertyEnum)
+                {
+                    case PropertyEnum.PowerRank:
+                        PowerIndexPropertyFlags |= PowerIndexPropertyFlags.PowerRank;
+                        break;
+
+                    case PropertyEnum.CharacterLevel:
+                        PowerIndexPropertyFlags |= PowerIndexPropertyFlags.CharacterLevel;
+                        break;
+
+                    case PropertyEnum.CombatLevel:
+                        PowerIndexPropertyFlags |= PowerIndexPropertyFlags.CombatLevel;
+                        break;
+
+                    case PropertyEnum.ItemLevel:
+                        PowerIndexPropertyFlags |= PowerIndexPropertyFlags.ItemLevel;
+                        break;
+
+                    case PropertyEnum.ItemVariation:
+                        PowerIndexPropertyFlags |= PowerIndexPropertyFlags.ItemVariation;
+                        break;
+                }
+            }
+
+            // Clean up
+            HashSetPool<PropertyEnum>.Instance.Return(enumSet);
+            ListPool<PropertyId>.Instance.Return(evalPropertyIdList);
         }
 
         public bool HasKeyword(KeywordPrototype keywordProto)
         {
             return keywordProto != null && KeywordPrototype.TestKeywordBit(KeywordsMask, keywordProto);
+        }
+
+        public bool HasKeyword(PrototypeId keywordProtoRef)
+        {
+            return HasKeyword(keywordProtoRef.As<KeywordPrototype>());
+        }
+
+        public AssetId GetUnrealClass(AssetId entityArtAssetRef, bool fallbackToDefault = true)
+        {
+            AssetId unrealClassAssetRef = fallbackToDefault ? UnrealClass : AssetId.Invalid;
+
+            if (UnrealOverrides.HasValue())
+            {
+                foreach (ConditionUnrealPrototype unrealAssetOverrideProto in UnrealOverrides)
+                {
+                    if (unrealAssetOverrideProto.EntityArt != entityArtAssetRef)
+                        continue;
+
+                    unrealClassAssetRef = unrealAssetOverrideProto.ConditionArt;
+                    break;
+                }
+            }
+
+            return unrealClassAssetRef;
+        }
+
+        public TimeSpan GetDuration(PropertyCollection properties = null, WorldEntity owner = null, PrototypeId powerProtoRef = PrototypeId.Invalid, WorldEntity target = null)
+        {
+            TimeSpan duration = TimeSpan.FromMilliseconds(DurationMS);
+
+            // Apply index property delta
+            if (properties != null && DurationMSCurve != CurveId.Invalid)
+            {
+                Curve durationCurve = DurationMSCurve.AsCurve();
+                if (durationCurve == null) return Logger.WarnReturn(duration, "GetDuration(): durationCurve == null");
+
+                PropertyInfoTable propInfoTable = GameDatabase.PropertyInfoTable;
+                PropertyEnum indexProp = propInfoTable.GetPropertyEnumFromPrototype(DurationMSCurveIndex);
+                PropertyInfo indexPropInfo = propInfoTable.LookupPropertyInfo(indexProp);
+
+                if (indexPropInfo.DataType != PropertyDataType.Integer)
+                    return Logger.WarnReturn(duration, "GetDuration(): indexPropInfo.DataType != PropertyDataType.Integer");
+
+                if (indexPropInfo.ParamCount != 0)
+                    return Logger.WarnReturn(duration, "GetDuration(): indexPropInfo.ParamCount != 0");
+
+                int curveDeltaMS = durationCurve.GetIntAt(properties[indexProp]);
+                duration += TimeSpan.FromMilliseconds(curveDeltaMS);
+            }
+
+            // Apply eval delta
+            if (DurationMSEval != null)
+            {
+                using EvalContextData evalContext = ObjectPoolManager.Instance.Get<EvalContextData>();
+                using PropertyCollection dummyProperties = ObjectPoolManager.Instance.Get<PropertyCollection>();
+
+                evalContext.Game = owner?.Game;
+                evalContext.SetReadOnlyVar_PropertyCollectionPtr(EvalContext.Default, properties);
+
+                if (owner != null)
+                {
+                    evalContext.SetReadOnlyVar_PropertyCollectionPtr(EvalContext.Entity, owner.Properties);
+                    evalContext.SetReadOnlyVar_EntityPtr(EvalContext.Var2, owner);
+                }
+                else
+                {
+                    evalContext.SetReadOnlyVar_PropertyCollectionPtr(EvalContext.Entity, dummyProperties);
+                    evalContext.SetReadOnlyVar_EntityPtr(EvalContext.Var2, null);
+                }
+
+                evalContext.SetReadOnlyVar_EntityPtr(EvalContext.Var3, target);
+
+                int evalDeltaMS = Eval.RunInt(DurationMSEval, evalContext);
+                duration += TimeSpan.FromMilliseconds(evalDeltaMS);
+
+                // Make sure there is no infinite duration as a result of running the eval
+                if (duration <= TimeSpan.Zero)
+                    return Logger.WarnReturn(TimeSpan.FromMilliseconds(1), "GetDuration(): DurationMSEval resulted in an infinite or negative duration!");
+            }
+
+            return duration;
+        }
+
+        public float GetChanceToApplyConditionEffects(PropertyCollection properties, WorldEntity target, ConditionCollection conditionCollection,
+            PrototypeId powerProtoRef, WorldEntity owner = null)
+        {
+            if (ChanceToApplyCondition == null)
+                return 1f;
+
+            using EvalContextData evalContext = ObjectPoolManager.Instance.Get<EvalContextData>();
+            evalContext.SetReadOnlyVar_PropertyCollectionPtr(EvalContext.Default, properties);
+            evalContext.SetReadOnlyVar_PropertyCollectionPtr(EvalContext.Other, target.Properties);
+            evalContext.SetReadOnlyVar_ConditionCollectionPtr(EvalContext.Var1, conditionCollection);
+            evalContext.SetReadOnlyVar_PropertyCollectionPtr(EvalContext.Entity, owner?.Properties);
+            evalContext.SetReadOnlyVar_EntityPtr(EvalContext.Var2, owner);
+            evalContext.SetReadOnlyVar_EntityPtr(EvalContext.Var3, target);
+
+            float chanceToApply = Eval.RunFloat(ChanceToApplyCondition, evalContext);
+            return Math.Clamp(chanceToApply, 0f, 1f);
         }
     }
 

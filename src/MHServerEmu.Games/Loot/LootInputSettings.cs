@@ -23,6 +23,8 @@ namespace MHServerEmu.Games.Loot
         public LootDropEventType EventType { get; set; } = LootDropEventType.None;
         public PrototypeId MissionProtoRef { get; set; } = PrototypeId.Invalid;
 
+        public bool IsInPool { get; set; }
+
         public void Initialize(LootContext lootContext, Player player, WorldEntity sourceEntity, int level, Vector3? positionOverride = null)
         {
             LootContext = lootContext;
@@ -44,22 +46,26 @@ namespace MHServerEmu.Games.Loot
                 LootRollSettings.DifficultyTier = region.DifficultyTierRef;
                 LootRollSettings.RegionScenarioRarity = region.Settings.ItemRarity;
             }
+
+            if (sourceEntity != null)
+            {
+                if (sourceEntity.IsInWorld && avatar?.IsInWorld == true)
+                    LootRollSettings.DropDistanceSq = Vector3.DistanceSquared2D(sourceEntity.RegionLocation.Position, avatar.RegionLocation.Position);
+
+                LootRollSettings.SourceEntityKeywords = sourceEntity.KeywordsMask;
+            }
+
+            LootRollSettings.AvatarConditionKeywords = avatar?.ConditionCollection?.ConditionKeywordsMask;
+            LootRollSettings.RegionKeywords = avatar?.RegionLocation.GetKeywordsMask();
         }
 
         public void Initialize(LootContext lootContext, Player player, WorldEntity sourceEntity, Vector3? positionOverride = null)
         {
             Avatar avatar = player.CurrentAvatar;
-            int level;
+            int level = 1;
 
-            if (avatar != null)
-            {
+            if (lootContext == LootContext.Drop && avatar != null)
                 level = avatar.CharacterLevel;
-            }
-            else
-            {
-                Logger.Warn("Initialize(): Player has no current avatar to get level from, defaulting to 1");
-                level = 1;
-            }
 
             Initialize(lootContext, player, sourceEntity, level, positionOverride);
         }

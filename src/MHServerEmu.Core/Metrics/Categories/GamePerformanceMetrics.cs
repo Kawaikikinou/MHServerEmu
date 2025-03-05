@@ -1,31 +1,23 @@
-﻿using System.Runtime.InteropServices;
-using System.Text;
+﻿using System.Text;
 using MHServerEmu.Core.Logging;
-using MHServerEmu.Core.Metrics.Entries;
-using MHServerEmu.Core.Metrics.Trackers;
 
 namespace MHServerEmu.Core.Metrics.Categories
 {
-    [StructLayout(LayoutKind.Explicit)]
     public readonly struct GamePerformanceMetricValue
     {
-        [FieldOffset(0)]
-        public readonly GamePerformanceMetricEnum Metric = default;
-        [FieldOffset(4)]
-        public readonly float FloatValue = default;
-        [FieldOffset(4)]
-        public readonly TimeSpan TimeValue = default;
+        public readonly GamePerformanceMetricEnum Metric = GamePerformanceMetricEnum.Invalid;
+        public readonly MetricValue Value = default;
 
         public GamePerformanceMetricValue(GamePerformanceMetricEnum metric, float value)
         {
             Metric = metric;
-            FloatValue = value;
+            Value = new(value);
         }
 
         public GamePerformanceMetricValue(GamePerformanceMetricEnum metric, TimeSpan value)
         {
             Metric = metric;
-            TimeValue = value;
+            Value = new(value);
         }
     }
 
@@ -34,81 +26,54 @@ namespace MHServerEmu.Core.Metrics.Categories
         private static readonly Logger Logger = LogManager.CreateLogger();
 
         // At 20 FPS this gives us about 51.2 seconds of data
-        private readonly TimeTracker _frameTimeTracker = new(1024);
-        private readonly TimeTracker _frameTriggerEventsTimeTracker = new(1024);
-        private readonly TimeTracker _frameLocomoteEntitiesTimeTracker = new(1024);
-        private readonly TimeTracker _framePhysicsResolveEntitiesTimeTracker = new(1024);
-        private readonly TimeTracker _frameProcessDeferredListsTimeTracker = new(1024);
-        private readonly TimeTracker _frameSendAllPendingMessagesTime = new(1024);
+        private const int NumSamples = 1024;
 
-        private readonly FloatTracker _catchUpFrameCountTracker = new(1024);
-        private readonly TimeTracker _timeSkipTracker = new(1024);
-
-        private readonly FloatTracker _scheduledEventsPerUpdateTracker = new(1024);
-        private readonly FloatTracker _eventSchedulerFramesPerUpdate = new(1024);
-        private readonly FloatTracker _remainingScheduledEventsTracker = new(1024);
+        private readonly MetricTracker[] _trackers;
 
         public ulong GameId { get; }
 
         public GamePerformanceMetrics(ulong gameId)
         {
             GameId = gameId;
+
+            _trackers = new MetricTracker[(int)GamePerformanceMetricEnum.NumGameMetrics];
+            for (GamePerformanceMetricEnum metric = 0; metric < GamePerformanceMetricEnum.NumGameMetrics; metric++)
+                _trackers[(int)metric] = new(NumSamples);
         }
 
-        public void Update(in GamePerformanceMetricValue metricValue)
+        public bool Update(in GamePerformanceMetricValue gameMetricValue)
         {
-            // add more data here
+            GamePerformanceMetricEnum metric = gameMetricValue.Metric;
+            if (metric < 0 || metric >= GamePerformanceMetricEnum.NumGameMetrics)
+                return Logger.WarnReturn(false, $"Update(): Metric {metric} is out of range");
 
-            switch (metricValue.Metric)
+            switch (metric)
             {
                 case GamePerformanceMetricEnum.FrameTime:
-                    _frameTimeTracker.Track(metricValue.TimeValue);
-                    break;
-
                 case GamePerformanceMetricEnum.FrameTriggerEventsTime:
-                    _frameTriggerEventsTimeTracker.Track(metricValue.TimeValue);
-                    break;
-
                 case GamePerformanceMetricEnum.FrameLocomoteEntitiesTime:
-                    _frameLocomoteEntitiesTimeTracker.Track(metricValue.TimeValue);
-                    break;
-
                 case GamePerformanceMetricEnum.FramePhysicsResolveEntitiesTime:
-                    _framePhysicsResolveEntitiesTimeTracker.Track(metricValue.TimeValue);
-                    break;
-
                 case GamePerformanceMetricEnum.FrameProcessDeferredListsTime:
-                    _frameProcessDeferredListsTimeTracker.Track(metricValue.TimeValue);
-                    break;
-
                 case GamePerformanceMetricEnum.FrameSendAllPendingMessagesTime:
-                    _frameSendAllPendingMessagesTime.Track(metricValue.TimeValue);
+                case GamePerformanceMetricEnum.TimeSkip:
+                    _trackers[(int)metric].Track(gameMetricValue.Value.TimeValue);
                     break;
 
                 case GamePerformanceMetricEnum.CatchUpFrames:
-                    _catchUpFrameCountTracker.Track(metricValue.FloatValue);
-                    break;
-
-                case GamePerformanceMetricEnum.TimeSkip:
-                    _timeSkipTracker.Track(metricValue.TimeValue);
-                    break;
-
                 case GamePerformanceMetricEnum.ScheduledEventsPerUpdate:
-                    _scheduledEventsPerUpdateTracker.Track(metricValue.FloatValue);
-                    break;
-
                 case GamePerformanceMetricEnum.EventSchedulerFramesPerUpdate:
-                    _eventSchedulerFramesPerUpdate.Track(metricValue.FloatValue);
-                    break;
-
                 case GamePerformanceMetricEnum.RemainingScheduledEvents:
-                    _remainingScheduledEventsTracker.Track(metricValue.FloatValue);
+                case GamePerformanceMetricEnum.EntityCount:
+                case GamePerformanceMetricEnum.PlayerCount:
+                    _trackers[(int)metric].Track(gameMetricValue.Value.FloatValue);
                     break;
 
                 default:
-                    Logger.Warn($"Update(): Unknown game performance metric {metricValue.Metric}");
+                    Logger.WarnReturn(false, $"Update(): Unhandled metric {metric}");
                     break;
             }
+
+            return true;
         }
 
         public Report GetReport()
@@ -116,33 +81,43 @@ namespace MHServerEmu.Core.Metrics.Categories
             return new(this);
         }
 
+        private MetricTracker.ReportEntry GetReportEntryForMetric(GamePerformanceMetricEnum metric)
+        {
+            return _trackers[(int)metric].AsReportEntry();
+        }
+
         public readonly struct Report
         {
-            public ReportTimeEntry FrameTime { get; }
-            public ReportTimeEntry FrameTriggerEventsTime { get; }
-            public ReportTimeEntry FrameLocomoteEntitiesTime { get; }
-            public ReportTimeEntry FramePhysicsResolveEntitiesTime { get; }
-            public ReportTimeEntry FrameProcessDeferredListsTime { get; }
-            public ReportTimeEntry FrameSendAllPendingMessagesTime { get; }
-            public ReportFloatEntry CatchUpFrames { get; }
-            public ReportTimeEntry TimeSkip { get; }
-            public ReportFloatEntry ScheduledEventsPerUpdate { get; }
-            public ReportFloatEntry EventSchedulerFramesPerUpdate { get; }
-            public ReportFloatEntry RemainingScheduledEvents { get; }
+            // TODO: Clean this up
+            public MetricTracker.ReportEntry FrameTime { get; }
+            public MetricTracker.ReportEntry FrameTriggerEventsTime { get; }
+            public MetricTracker.ReportEntry FrameLocomoteEntitiesTime { get; }
+            public MetricTracker.ReportEntry FramePhysicsResolveEntitiesTime { get; }
+            public MetricTracker.ReportEntry FrameProcessDeferredListsTime { get; }
+            public MetricTracker.ReportEntry FrameSendAllPendingMessagesTime { get; }
+            public MetricTracker.ReportEntry CatchUpFrames { get; }
+            public MetricTracker.ReportEntry TimeSkip { get; }
+            public MetricTracker.ReportEntry ScheduledEventsPerUpdate { get; }
+            public MetricTracker.ReportEntry EventSchedulerFramesPerUpdate { get; }
+            public MetricTracker.ReportEntry RemainingScheduledEvents { get; }
+            public MetricTracker.ReportEntry EntityCount { get; }
+            public MetricTracker.ReportEntry PlayerCount { get; }
 
             public Report(GamePerformanceMetrics metrics)
             {
-                FrameTime = metrics._frameTimeTracker.AsReportEntry();
-                FrameTriggerEventsTime = metrics._frameTriggerEventsTimeTracker.AsReportEntry();
-                FrameLocomoteEntitiesTime = metrics._frameLocomoteEntitiesTimeTracker.AsReportEntry();
-                FramePhysicsResolveEntitiesTime = metrics._framePhysicsResolveEntitiesTimeTracker.AsReportEntry();
-                FrameProcessDeferredListsTime = metrics._frameProcessDeferredListsTimeTracker.AsReportEntry();
-                FrameSendAllPendingMessagesTime = metrics._frameSendAllPendingMessagesTime.AsReportEntry();
-                CatchUpFrames = metrics._catchUpFrameCountTracker.AsReportEntry();
-                TimeSkip = metrics._timeSkipTracker.AsReportEntry();
-                ScheduledEventsPerUpdate = metrics._scheduledEventsPerUpdateTracker.AsReportEntry();
-                EventSchedulerFramesPerUpdate = metrics._eventSchedulerFramesPerUpdate.AsReportEntry();
-                RemainingScheduledEvents = metrics._remainingScheduledEventsTracker.AsReportEntry();
+                FrameTime                       = metrics.GetReportEntryForMetric(GamePerformanceMetricEnum.FrameTime);
+                FrameTriggerEventsTime          = metrics.GetReportEntryForMetric(GamePerformanceMetricEnum.FrameTriggerEventsTime);
+                FrameLocomoteEntitiesTime       = metrics.GetReportEntryForMetric(GamePerformanceMetricEnum.FrameLocomoteEntitiesTime);
+                FramePhysicsResolveEntitiesTime = metrics.GetReportEntryForMetric(GamePerformanceMetricEnum.FramePhysicsResolveEntitiesTime);
+                FrameProcessDeferredListsTime   = metrics.GetReportEntryForMetric(GamePerformanceMetricEnum.FrameProcessDeferredListsTime);
+                FrameSendAllPendingMessagesTime = metrics.GetReportEntryForMetric(GamePerformanceMetricEnum.FrameSendAllPendingMessagesTime);
+                CatchUpFrames                   = metrics.GetReportEntryForMetric(GamePerformanceMetricEnum.CatchUpFrames);
+                TimeSkip                        = metrics.GetReportEntryForMetric(GamePerformanceMetricEnum.TimeSkip);
+                ScheduledEventsPerUpdate        = metrics.GetReportEntryForMetric(GamePerformanceMetricEnum.ScheduledEventsPerUpdate);
+                EventSchedulerFramesPerUpdate   = metrics.GetReportEntryForMetric(GamePerformanceMetricEnum.EventSchedulerFramesPerUpdate);
+                RemainingScheduledEvents        = metrics.GetReportEntryForMetric(GamePerformanceMetricEnum.RemainingScheduledEvents);
+                EntityCount                     = metrics.GetReportEntryForMetric(GamePerformanceMetricEnum.EntityCount);
+                PlayerCount                     = metrics.GetReportEntryForMetric(GamePerformanceMetricEnum.PlayerCount);
             }
 
             public override string ToString()
@@ -159,6 +134,8 @@ namespace MHServerEmu.Core.Metrics.Categories
                 sb.AppendLine($"{nameof(ScheduledEventsPerUpdate)}: {ScheduledEventsPerUpdate}");
                 sb.AppendLine($"{nameof(EventSchedulerFramesPerUpdate)}: {EventSchedulerFramesPerUpdate}");
                 sb.AppendLine($"{nameof(RemainingScheduledEvents)}: {RemainingScheduledEvents}");
+                sb.AppendLine($"{nameof(EntityCount)}: {EntityCount}");
+                sb.AppendLine($"{nameof(PlayerCount)}: {PlayerCount}");
                 return sb.ToString();
             }
         }

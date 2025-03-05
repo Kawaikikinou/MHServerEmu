@@ -4,6 +4,7 @@ using MHServerEmu.Core.Memory;
 using MHServerEmu.Core.System;
 using MHServerEmu.Core.System.Time;
 using MHServerEmu.Games.Entities;
+using MHServerEmu.Games.Entities.Avatars;
 using MHServerEmu.Games.GameData;
 using MHServerEmu.Games.GameData.Prototypes;
 using MHServerEmu.Games.MetaGames;
@@ -178,11 +179,10 @@ namespace MHServerEmu.Games.Regions
                 return Logger.WarnReturn<Region>(null, $"GetRegion(): Failed to get difficulty tier for region {regionProto}");
 
             regionContext.DifficultyTierRef = difficultyTierProtoRef;
+            regionContext.Level = 0;
 
             if (regionProto.HasEndless() && regionContext.EndlessLevel == 0)
                 return Logger.WarnReturn<Region>(null, $"GetRegion(): DangerRoom {regionProtoRef} with EndlessLevel = 0");
-
-            //prototype = RegionPrototypeId.NPEAvengersTowerHUBRegion;
 
             Region region = null;
 
@@ -208,7 +208,8 @@ namespace MHServerEmu.Games.Regions
                 if (regionId == 0 
                     || _allRegions.TryGetValue(regionId, out region) == false 
                     || region.DifficultyTierRef != regionContext.DifficultyTierRef 
-                    || region.Settings.EndlessLevel != regionContext.EndlessLevel) // Danger Room next level
+                    || region.Settings.EndlessLevel != regionContext.EndlessLevel // Danger Room next level
+                    || region.Settings.PortalId != regionContext.PortalId) // TODO remake portal for Party
                 {
                     // MetaStateShutdown will shutdown old region
                     if (region != null && region.Settings.EndlessLevel == regionContext.EndlessLevel)
@@ -332,7 +333,7 @@ namespace MHServerEmu.Games.Regions
         {
             EntityManager entityManager = Game.EntityManager;
 
-            List<Region> regionList = ListPool<Region>.Instance.Rent();
+            List<Region> regionList = ListPool<Region>.Instance.Get();
 
             foreach (Region region in _matches.Values)
             {

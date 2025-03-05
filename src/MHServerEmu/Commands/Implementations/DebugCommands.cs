@@ -1,19 +1,21 @@
-﻿using MHServerEmu.Commands.Attributes;
-using MHServerEmu.Core.Collisions;
+﻿using Gazillion;
+using MHServerEmu.Commands.Attributes;
 using MHServerEmu.Core.Helpers;
 using MHServerEmu.Core.Logging;
-using MHServerEmu.Core.Memory;
+using MHServerEmu.Core.VectorMath;
 using MHServerEmu.DatabaseAccess.Models;
 using MHServerEmu.Frontend;
 using MHServerEmu.Games;
+using MHServerEmu.Games.Common;
 using MHServerEmu.Games.Entities;
 using MHServerEmu.Games.Entities.Avatars;
 using MHServerEmu.Games.GameData;
+using MHServerEmu.Games.GameData.Prototypes;
 using MHServerEmu.Games.Missions;
 using MHServerEmu.Games.Navi;
 using MHServerEmu.Games.Network;
 using MHServerEmu.Games.Populations;
-using MHServerEmu.Grouping;
+using MHServerEmu.Games.Powers.Conditions;
 
 namespace MHServerEmu.Commands.Implementations
 {
@@ -35,18 +37,6 @@ namespace MHServerEmu.Commands.Implementations
             GC.WaitForPendingFinalizers();
             
             return "Manual garbage collection successfully requested.";
-        }
-
-        [Command("objectpoolreport", "Generates object pool report.")]
-        public string ObjectPoolReport(string[] @params, FrontendClient client)
-        {
-            string report = ObjectPoolManager.Instance.GenerateReport();
-            
-            if (client == null)
-                return report;
-
-            ChatHelper.SendMetagameMessageSplit(client, report);
-            return string.Empty;
         }
 
         [Command("cell", "Shows current cell.", AccountUserLevel.User)]
@@ -97,6 +87,19 @@ namespace MHServerEmu.Commands.Implementations
             On
         }
 
+        [Command("setmarker", "Usage: debug setmarker [MarkerRef].", AccountUserLevel.Admin)]
+        public string SetMarker(string[] @params, FrontendClient client)
+        {
+            if (@params.Length == 0) return "Invalid arguments. Type 'help debug setmarker' to get help.";
+
+            if (PrototypeId.TryParse(@params[0], out PrototypeId markerRef) == false)
+                return $"Failed to parse MarkerRef {@params[0]}";
+
+            PopulationManager.MarkerRef = markerRef;
+
+            return $"SetMarker [{markerRef.GetNameFormatted()}]";
+        }
+
         [Command("spawn", "Usage: debug spawn [on|off].", AccountUserLevel.Admin)]
         public string Spawn(string[] @params, FrontendClient client)
         {
@@ -106,6 +109,19 @@ namespace MHServerEmu.Commands.Implementations
             PopulationManager.Debug = (flags == Switch.On) ? true : false;
 
             return $"Spawn Log [{flags}]";
+        }
+
+        [Command("ai", "Usage: debug ai.", AccountUserLevel.Admin)]
+        public string AI(string[] @params, FrontendClient client)
+        {
+            if (client == null) return "You can only invoke this command from the game.";
+
+            CommandHelper.TryGetPlayerConnection(client, out PlayerConnection playerConnection);
+            EntityManager entityManager = playerConnection.Game.EntityManager;
+
+            bool enableAI = entityManager.IsAIEnabled == false;
+            entityManager.EnableAI(enableAI);
+            return $"AI [{(enableAI ? "On" : "Off")}]";
         }
 
         [Command("mission", "Usage: debug mission [on|off].", AccountUserLevel.Admin)]
@@ -148,116 +164,6 @@ namespace MHServerEmu.Commands.Implementations
             return $"NaviMesh saved as {filename}";
         }
 
-        [Command("isblocked", "Usage: debug isblocked [EntityId1] [EntityId2]", AccountUserLevel.User)]
-        public string IsBlocked(string[] @params, FrontendClient client)
-        {
-            if (client == null) return "You can only invoke this command from the game.";
-            if (@params.Length == 0) return "Invalid arguments. Type 'help debug isblocked' to get help.";
-
-            if (ulong.TryParse(@params[0], out ulong entityId1) == false)
-                return $"Failed to parse EntityId1 {@params[0]}";
-
-            if (ulong.TryParse(@params[1], out ulong entityId2) == false)
-                return $"Failed to parse EntityId2 {@params[1]}";
-
-            CommandHelper.TryGetGame(client, out Game game);
-            var manager = game.EntityManager;
-
-            var entity1 = manager.GetEntity<WorldEntity>(entityId1);
-            if (entity1 == null) return $"No entity found for {entityId1}";
-
-            var entity2 = manager.GetEntity<WorldEntity>(entityId2);
-            if (entity2 == null) return $"No entity found for {entityId2}";
-
-            Bounds bounds = entity1.Bounds;
-            bool isBlocked = Games.Regions.Region.IsBoundsBlockedByEntity(bounds, entity2, BlockingCheckFlags.CheckSpawns);
-            return $"Entities\n [{entity1.PrototypeName}]\n [{entity2.PrototypeName}]\nIsBlocked: {isBlocked}";
-        }
-
-        [Command("near", "Usage: debug near [radius]. Default radius 100.", AccountUserLevel.User)]
-        public string Near(string[] @params, FrontendClient client)
-        {
-            if (client == null) return "You can only invoke this command from the game.";
-
-            CommandHelper.TryGetPlayerConnection(client, out PlayerConnection playerConnection);
-            Avatar avatar = playerConnection.Player.CurrentAvatar;
-
-            if ((@params.Length > 0 && int.TryParse(@params[0], out int radius)) == false)
-                radius = 100;   // Default to 100 if no radius is specified
-
-            Sphere near = new(avatar.RegionLocation.Position, radius);
-
-            List<string> entities = new();
-            foreach (var worldEntity in playerConnection.AOI.Region.IterateEntitiesInVolume(near, new()))
-            {
-                string name = worldEntity.PrototypeName;
-                ulong entityId = worldEntity.Id;
-                string status = string.Empty;
-                if (playerConnection.AOI.InterestedInEntity(entityId) == false) status += "[H]";
-                if (worldEntity is Transition) status += "[T]";
-                if (worldEntity.WorldEntityPrototype.VisibleByDefault == false) status += "[Inv]";
-                entities.Add($"[E][{entityId}] {name} {status}");
-            }
-
-            foreach (var reservation in playerConnection.AOI.Region.SpawnMarkerRegistry.IterateReservationsInVolume(near))
-            {
-                string name = GameDatabase.GetFormattedPrototypeName(reservation.MarkerRef);
-                int markerId = reservation.GetPid();
-                string status = $"[{reservation.Type.ToString()[0]}][{reservation.State.ToString()[0]}]";
-                entities.Add($"[M][{markerId}] {name} {status}");
-            }
-
-            if (entities.Count == 0)
-                return "No objects found.";
-
-            ChatHelper.SendMetagameMessage(client, $"Found for R={radius}:");
-            ChatHelper.SendMetagameMessages(client, entities, false);
-            return string.Empty;
-        }
-
-        [Command("marker", "Displays information about the specified marker.\nUsage: debug marker [MarkerId]", AccountUserLevel.User)]
-        public string Marker(string[] @params, FrontendClient client)
-        {
-            if (client == null) return "You can only invoke this command from the game.";
-            if (@params.Length == 0) return "Invalid arguments. Type 'help debug marker' to get help.";
-
-            if (int.TryParse(@params[0], out int markerId) == false)
-                return $"Failed to parse MarkerId {@params[0]}";
-
-            CommandHelper.TryGetPlayerConnection(client, out PlayerConnection playerConnection);
-
-            var reservation = playerConnection.AOI.Region.SpawnMarkerRegistry.GetReservationByPid(markerId);
-            if (reservation == null) return "No marker found.";
-
-            ChatHelper.SendMetagameMessage(client, $"Marker[{markerId}]: {GameDatabase.GetFormattedPrototypeName(reservation.MarkerRef)}");
-            ChatHelper.SendMetagameMessageSplit(client, reservation.ToString(), false);
-            return string.Empty;
-        }
-
-        [Command("entity", "Displays information about the specified entity.\nUsage: debug entity [EntityId]", AccountUserLevel.User)]
-        public string Entity(string[] @params, FrontendClient client)
-        {
-            if (client == null) return "You can only invoke this command from the game.";
-            if (@params.Length == 0) return "Invalid arguments. Type 'help debug entity' to get help.";
-
-            if (ulong.TryParse(@params[0], out ulong entityId) == false)
-                return $"Failed to parse EntityId {@params[0]}";
-
-            CommandHelper.TryGetGame(client, out Game game);
-
-            var entity = game.EntityManager.GetEntity<Entity>(entityId);
-            if (entity == null) return "No entity found.";
-
-            ChatHelper.SendMetagameMessage(client, $"Entity[{entityId}]: {GameDatabase.GetFormattedPrototypeName(entity.PrototypeDataRef)}");
-            ChatHelper.SendMetagameMessageSplit(client, entity.Properties.ToString(), false);
-            if (entity is WorldEntity worldEntity)
-            {
-                ChatHelper.SendMetagameMessageSplit(client, worldEntity.Bounds.ToString(), false);
-                ChatHelper.SendMetagameMessageSplit(client, worldEntity.PowerCollectionToString(), false);
-            }
-            return string.Empty;
-        }
-
         [Command("crashgame", "Crashes the current game instance.", AccountUserLevel.Admin)]
         public string CrashGame(string[] @params, FrontendClient client)
         {
@@ -270,6 +176,61 @@ namespace MHServerEmu.Commands.Implementations
         {
             if (client != null) return "You can only invoke this command from the server console.";
             throw new("Server crash invoked by a debug command.");
+        }
+
+        [Command("getconditionlist", "Gets a list of all conditions tracked by the ConditionPool.")]
+        public string GetConditionList(string[] @params, FrontendClient client)
+        {
+            if (client == null) return "You can only invoke this command from the game.";
+
+            string filePath = $"Download/Conditions_{DateTime.UtcNow.ToString(FileHelper.FileNameDateFormat)}.txt";
+
+            client.SendMessage(1, NetMessageAdminCommandResponse.CreateBuilder()
+                .SetResponse($"Saved condition list for the current game to {filePath}")
+                .SetFilerelativepath(filePath)
+                .SetFilecontents(ConditionPool.Instance.GetConditionList())
+                .Build());
+
+            return string.Empty;
+        }
+
+        [Command("difficulty", "Shows information about the current difficulty level.")]
+        public string Difficulty(string[] @params, FrontendClient client)
+        {
+            if (client == null) return "You can only invoke this command from the game.";
+            CommandHelper.TryGetPlayerConnection(client, out PlayerConnection playerConnection);
+
+            Avatar avatar = playerConnection.Player?.CurrentAvatar;
+            if (avatar == null || avatar.IsInWorld == false)
+                return string.Empty;
+
+            var region = avatar.Region;
+            Vector3 position = avatar.RegionLocation.Position;
+            TuningTable tuningTable = region.TuningTable;
+
+            float playerToMob = tuningTable.GetDamageMultiplier(true, Rank.Popcorn, position);
+            float mobToPlayer = tuningTable.GetDamageMultiplier(false, Rank.Player, position);
+
+            return $"Region={region.Prototype}, TuningTable={tuningTable.Prototype}, playerToMob={playerToMob}, mobToPlayer={mobToPlayer}";
+        }
+
+        [Command("geteventpoolreport", "Returns a report representing the state of the ScheduledEventPool in the current game.")]
+        public string GetEventPoolStatus(string[] @params, FrontendClient client)
+        {
+            if (client == null) return "You can only invoke this command from the game.";
+
+            CommandHelper.TryGetGame(client, out Game game);
+            string reportString = game.GameEventScheduler.GetPoolReportString();
+
+            string filePath = $"Download/ScheduledEventPoolReport_{DateTime.UtcNow.ToString(FileHelper.FileNameDateFormat)}.txt";
+
+            client.SendMessage(1, NetMessageAdminCommandResponse.CreateBuilder()
+                .SetResponse($"Saved scheduled event pool report for the current game to {filePath}")
+                .SetFilerelativepath(filePath)
+                .SetFilecontents(reportString)
+                .Build());
+
+            return string.Empty;
         }
     }
 }

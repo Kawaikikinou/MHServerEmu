@@ -74,8 +74,10 @@ namespace MHServerEmu.Games.Entities
 
         public ItemSpec ItemSpec { get; set; }                      // For Item
         public TimeSpan Lifespan { get; set; }
-        public uint VariationSeed { get; set; }
+        public int VariationSeed { get; set; }
         public bool IsPopulation { get; set; }
+
+        public bool IsInPool { get; set; }
 
         public EntitySettings() { }     // Use pooling instead of calling this directly
 

@@ -19,19 +19,26 @@ namespace MHServerEmu.Games.Regions
         public PropertyCollection Properties { get; set; }
         public ulong PlayerGuidParty { get; set; }
 
-        public bool DebugLevel { get; set; }
+        public bool ApplyLevelOverride { get; set; }
         public bool GenerateLog { get; set; }
         public bool GenerateEntities { get; set; }
         public bool GenerateAreas { get; set; }
         public PrototypeId GameStateId { get; set; }
         public PrototypeId ItemRarity { get; set; }
+        public ulong PortalId { get; set; }
 
         public RegionSettings() { }
 
         public RegionSettings(RegionContext regionContext)
         {
             RegionDataRef = regionContext.RegionDataRef;
-            Level = regionContext.Level;
+
+            if (regionContext.Level != 0)
+            {
+                ApplyLevelOverride = true;
+                Level = regionContext.Level;
+            }
+
             DifficultyTierRef = regionContext.DifficultyTierRef;
             Seed = regionContext.Seed;
             Affixes = new(regionContext.Affixes);
@@ -39,6 +46,7 @@ namespace MHServerEmu.Games.Regions
             EndlessLevel = regionContext.EndlessLevel;
             PlayerDeaths = regionContext.PlayerDeaths;
             PlayerGuidParty = regionContext.PlayerGuidParty;
+            PortalId = regionContext.PortalId;
 
             if (regionContext.Properties.IsEmpty == false)
             {
@@ -60,6 +68,7 @@ namespace MHServerEmu.Games.Regions
         public int Seed;
         public int PlayerDeaths;
         public PrototypeId ItemRarity;
+        public ulong PortalId;
 
         public RegionContext() : this(PrototypeId.Invalid, PrototypeId.Invalid) { }
 
@@ -70,8 +79,9 @@ namespace MHServerEmu.Games.Regions
             Affixes = new();
             Properties = new();
             EndlessLevel = 0;
-            Level = 60;
+            Level = 0;
             PlayerGuidParty = 0;
+            PortalId = 0;
         }
 
         public override string ToString()
@@ -86,6 +96,7 @@ namespace MHServerEmu.Games.Regions
             Properties.CopyPropertyRange(region.Properties, PropertyEnum.ScoringEventTimerAccumTimeMS);
             DifficultyTierRef = settings.DifficultyTierRef;
             PlayerGuidParty = settings.PlayerGuidParty;
+            PortalId = settings.PortalId;
             EndlessLevel = settings.EndlessLevel + 1;
             ItemRarity = settings.ItemRarity;
             Affixes = new(settings.Affixes);
@@ -98,6 +109,13 @@ namespace MHServerEmu.Games.Regions
             EndlessLevel = 0;
             Affixes.Clear();
             Properties.Clear();
+        }
+
+        public void ResetRegionSettings()
+        {
+            PortalId = 0;
+            PlayerDeaths = 0;
+            PlayerGuidParty = 0;
         }
 
         public void CopyScenarioProperties(PropertyCollection properties)

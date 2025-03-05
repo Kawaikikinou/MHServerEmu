@@ -1584,7 +1584,7 @@ namespace MHServerEmu.Games.Properties.Evals
                 return Logger.WarnReturn(evalVar, "Or: Non-Bool/Error field Arg1");
 
             if (arg1.Value.Bool)
-                evalVar.SetBool(false); 
+                evalVar.SetBool(true); 
             else
             {
                 EvalVar arg2 = Run(OrProto.Arg2, data);
@@ -1841,13 +1841,10 @@ namespace MHServerEmu.Games.Properties.Evals
                 return evalVar;
 
             if (conditionCollection != null)
-                foreach (var kvp in conditionCollection)
+                foreach (var condition in conditionCollection)
                 {
-                    Condition condition = kvp.Value;
-                    if (condition == null) continue;
-
                     data.SetVar_PropertyCollectionPtr(EvalContext.Condition, condition.Properties);
-                    data.SetReadOnlyVar_ProtoRefVectorPtr(EvalContext.ConditionKeywords, condition.Keywords);
+                    data.SetReadOnlyVar_ProtoRefVectorPtr(EvalContext.ConditionKeywords, condition.GetKeywords());
 
                     if (forEachProto.LoopConditionPreScope != null)
                     {
@@ -3091,7 +3088,7 @@ namespace MHServerEmu.Games.Properties.Evals
                 if (entity is WorldEntity worldEntity)
                 {
                     float defenseRating = worldEntity.GetDefenseRating(getDamageReductionPctProto.VsDamageType);
-                    evalVar.SetFloat(worldEntity.GetDamageReductionPct(defenseRating, worldEntity, null));
+                    evalVar.SetFloat(worldEntity.GetDamageReductionPct(defenseRating, worldEntity.Properties, null));
                 }
 
             return evalVar;

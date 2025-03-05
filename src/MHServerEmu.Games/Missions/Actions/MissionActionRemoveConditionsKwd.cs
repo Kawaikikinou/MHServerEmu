@@ -1,3 +1,4 @@
+using MHServerEmu.Core.Memory;
 using MHServerEmu.Games.Entities;
 using MHServerEmu.Games.GameData;
 using MHServerEmu.Games.GameData.Prototypes;
@@ -17,18 +18,19 @@ namespace MHServerEmu.Games.Missions.Actions
         {
             var keywordRef = _proto.Keyword;
             if (keywordRef == PrototypeId.Invalid) return;
-            var keywordProto = GameDatabase.GetPrototype<KeywordPrototype>(keywordRef);
-            foreach (Player player in GetDistributors(_proto.SendTo))
+
+            List<Player> players = ListPool<Player>.Instance.Get();
+            if (GetDistributors(_proto.SendTo, players))
             {
-                var conditions = player.CurrentAvatar?.ConditionCollection;
-                if (conditions == null) continue;
-                foreach (var kvp in conditions.ToArray()) 
+                foreach (Player player in players)
                 {
-                    var condition = kvp.Value;
-                    if (condition.HasKeyword(keywordProto))
-                        conditions.RemoveCondition(kvp.Key);
+                    var conditions = player.CurrentAvatar?.ConditionCollection;
+                    if (conditions == null) continue;
+
+                    conditions.RemoveConditionsWithKeyword(keywordRef);
                 }
             }
+            ListPool<Player>.Instance.Return(players);
         }
     }
 }

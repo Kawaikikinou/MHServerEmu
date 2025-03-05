@@ -6,6 +6,7 @@ using MHServerEmu.Core.Config;
 using MHServerEmu.Core.Extensions;
 using MHServerEmu.Core.Helpers;
 using MHServerEmu.Core.Logging;
+using MHServerEmu.Core.Memory;
 using MHServerEmu.Core.Metrics;
 using MHServerEmu.Core.Network;
 using MHServerEmu.Core.System.Random;
@@ -52,6 +53,7 @@ namespace MHServerEmu.Games
         private FixedQuantumGameTime _realGameTime = new(TimeSpan.FromMilliseconds(1));
         private TimeSpan _currentGameTime = TimeSpan.FromMilliseconds(1);   // Current time in the game simulation
         private TimeSpan _lastFixedTimeUpdateProcessTime;                   // How long the last fixed update took
+        private TimeSpan _fixedTimeUpdateProcessTimeLogThreshold;
         private long _frameCount;
 
         private int _liveTuningChangeNum;
@@ -84,11 +86,17 @@ namespace MHServerEmu.Games
         public Dictionary<ulong, IArchiveMessageHandler> MessageHandlerDict { get; } = new();
         public bool OmegaMissionsEnabled { get; set; }
         public bool AchievementsEnabled { get; set; }
+        public bool InfinitySystemEnabled { get => GameOptions.InfinitySystemEnabled; }
+
+        public int PlayerCount { get => EntityManager.PlayerCount; }
 
         public override string ToString() => $"serverGameId=0x{Id:X}";
 
         public Game(ulong id)
         {
+            // Small lags are fine, and logging all of them creates too much noise
+            _fixedTimeUpdateProcessTimeLogThreshold = FixedTimeBetweenUpdates * 2;
+
             Id = id;
 
             // Initialize game options
@@ -274,6 +282,9 @@ namespace MHServerEmu.Games
             Current = this;
             _gameTimer.Start();
 
+            CollectionPoolSettings.UseThreadLocalStorage = true;
+            ObjectPoolManager.UseThreadLocalStorage = true;
+
             try
             {
                 while (IsRunning)
@@ -334,8 +345,12 @@ namespace MHServerEmu.Games
                 _lastFixedTimeUpdateProcessTime = _gameTimer.Elapsed - stepStartTime;
                 MetricsManager.Instance.RecordGamePerformanceMetric(Id, GamePerformanceMetricEnum.FrameTime, _lastFixedTimeUpdateProcessTime);
 
-                if (_lastFixedTimeUpdateProcessTime > FixedTimeBetweenUpdates)
-                    Logger.Trace($"UpdateFixedTime(): Frame took longer ({_lastFixedTimeUpdateProcessTime.TotalMilliseconds:0.00} ms) than FixedTimeBetweenUpdates ({FixedTimeBetweenUpdates.TotalMilliseconds:0.00} ms)");
+                // Record additional metrics
+                MetricsManager.Instance.RecordGamePerformanceMetric(Id, GamePerformanceMetricEnum.EntityCount, EntityManager.EntityCount);
+                MetricsManager.Instance.RecordGamePerformanceMetric(Id, GamePerformanceMetricEnum.PlayerCount, EntityManager.PlayerCount);
+
+                if (_lastFixedTimeUpdateProcessTime > _fixedTimeUpdateProcessTimeLogThreshold)
+                    Logger.Trace($"UpdateFixedTime(): Frame took longer ({_lastFixedTimeUpdateProcessTime.TotalMilliseconds:0.00} ms) than _fixedTimeUpdateWarningThreshold ({_fixedTimeUpdateProcessTimeLogThreshold.TotalMilliseconds:0.00} ms)");
 
                 // Bail out if we have fallen behind more exceeded frame budget
                 if (_gameTimer.Elapsed - updateStartTime > FixedTimeBetweenUpdates)
@@ -433,9 +448,8 @@ namespace MHServerEmu.Games
                     writer.WriteLine(region.ToString());
                 writer.WriteLine();
 
-                writer.WriteLine("Scheduled Events:");
-                foreach (var kvp in GameEventScheduler.GetScheduledEventCounts())
-                    writer.WriteLine($"{kvp.Key} x{kvp.Value}");
+                writer.WriteLine("Scheduled Event Pool:");
+                writer.Write(GameEventScheduler.GetPoolReportString());
                 writer.WriteLine();
 
                 writer.WriteLine($"Server Status:\n{ServerManager.Instance.GetServerStatus(true)}\n");

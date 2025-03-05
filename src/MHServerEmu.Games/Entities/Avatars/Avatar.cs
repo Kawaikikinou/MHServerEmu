@@ -20,22 +20,32 @@ using MHServerEmu.Games.GameData.Calligraphy;
 using MHServerEmu.Games.GameData.LiveTuning;
 using MHServerEmu.Games.GameData.Prototypes;
 using MHServerEmu.Games.GameData.Tables;
+using MHServerEmu.Games.MetaGames;
 using MHServerEmu.Games.Network;
 using MHServerEmu.Games.Powers;
+using MHServerEmu.Games.Powers.Conditions;
 using MHServerEmu.Games.Properties;
+using MHServerEmu.Games.Properties.Evals;
 using MHServerEmu.Games.Regions;
 using MHServerEmu.Games.Social.Guilds;
 
 namespace MHServerEmu.Games.Entities.Avatars
 {
-    public class Avatar : Agent
+    public partial class Avatar : Agent
     {
         private static readonly Logger Logger = LogManager.CreateLogger();
         private static readonly TimeSpan StandardContinuousPowerRecheckDelay = TimeSpan.FromMilliseconds(150);
 
         private readonly EventPointer<ActivateSwapInPowerEvent> _activateSwapInPowerEvent = new();
         private readonly EventPointer<RecheckContinuousPowerEvent> _recheckContinuousPowerEvent = new();
+        private readonly EventPointer<DelayedPowerActivationEvent> _delayedPowerActivationEvent = new();
         private readonly EventPointer<AvatarEnteredRegionEvent> _avatarEnteredRegionEvent = new();
+        private readonly EventPointer<RefreshStatsPowersEvent> _refreshStatsPowerEvent = new();
+        private readonly EventPointer<DismissTeamUpAgentEvent> _dismissTeamUpAgentEvent = new();
+        private readonly EventPointer<DespawnControlledEvent> _despawnControlledEvent = new();
+
+        private readonly EventPointer<EnableEnduranceRegenEvent>[] _enableEnduranceRegenEvents = new EventPointer<EnableEnduranceRegenEvent>[(int)ManaType.NumTypes];
+        private readonly EventPointer<UpdateEnduranceEvent>[] _updateEnduranceEvents = new EventPointer<UpdateEnduranceEvent>[(int)ManaType.NumTypes];
 
         private RepString _playerName = new();
         private ulong _ownerPlayerDbId;
@@ -57,6 +67,10 @@ namespace MHServerEmu.Games.Entities.Avatars
         public AvatarPrototype AvatarPrototype { get => Prototype as AvatarPrototype; }
         public int PrestigeLevel { get => Properties[PropertyEnum.AvatarPrestigeLevel]; }
         public override bool IsAtLevelCap { get => CharacterLevel >= GetAvatarLevelCap(); }
+        public override int Throwability { get => GetThrowability(); }
+
+        public PrototypeId EquippedCostumeRef { get => Properties[PropertyEnum.CostumeCurrent]; }
+        public CostumePrototype EquippedCostume { get => EquippedCostumeRef.As<CostumePrototype>(); }
 
         public bool IsUsingGamepadInput { get; set; } = false;
         public PrototypeId CurrentTransformMode { get; private set; } = PrototypeId.Invalid;
@@ -78,6 +92,8 @@ namespace MHServerEmu.Games.Entities.Avatars
 
         public AvatarModePrototype AvatarModePrototype { get => GameDatabase.GetPrototype<AvatarModePrototype>(Properties[PropertyEnum.AvatarMode]); }
         public AvatarMode AvatarMode { get => AvatarModePrototype?.AvatarModeEnum ?? AvatarMode.Invalid; }
+        public Inventory ControlledInventory { get => GetInventory(InventoryConvenienceLabel.Controlled); }
+        public Agent ControlledAgent { get => GetControlledAgent(); }
 
         public Avatar(Game game) : base(game) { }
 
@@ -85,6 +101,13 @@ namespace MHServerEmu.Games.Entities.Avatars
         {
             base.Initialize(settings);
 
+            // NOTE: We need to set owner player dbid asap for it to be restored in persistent conditions
+            if (settings.InventoryLocation != null)
+            {
+                Player player = Game.EntityManager.GetEntity<Player>(settings.InventoryLocation.ContainerId);
+                if (player != null)
+                    _ownerPlayerDbId = player.DatabaseUniqueId;
+            }
 
             return true;
         }
@@ -104,55 +127,6 @@ namespace MHServerEmu.Games.Entities.Avatars
 
             Properties[PropertyEnum.CombatLevel] = CharacterLevel;
 
-            // HACK: Set health to max for new avatars
-            if (Properties[PropertyEnum.Health] == 0)
-                Properties[PropertyEnum.Health] = Properties[PropertyEnum.HealthMaxOther];
-
-            // Resources
-            // Ger primary resources defaults from PrimaryResourceBehaviors
-            foreach (PrototypeId manaBehaviorId in avatarProto.PrimaryResourceBehaviors)
-            {
-                var behaviorPrototype = GameDatabase.GetPrototype<PrimaryResourceManaBehaviorPrototype>(manaBehaviorId);
-                Curve manaCurve = GameDatabase.GetCurve(behaviorPrototype.BaseEndurancePerLevel);
-                Properties[PropertyEnum.EnduranceBase, (int)behaviorPrototype.ManaType] = manaCurve.GetAt(60);
-            }
-;
-            // Set primary resources
-            Properties[PropertyEnum.EnduranceMaxOther] = Properties[PropertyEnum.EnduranceBase];
-            Properties[PropertyEnum.EnduranceMax] = Properties[PropertyEnum.EnduranceMaxOther];
-            Properties[PropertyEnum.Endurance] = Properties[PropertyEnum.EnduranceMax];
-            Properties[PropertyEnum.EnduranceMaxOther, (int)ManaType.Type2] = Properties[PropertyEnum.EnduranceBase, (int)ManaType.Type2];
-            Properties[PropertyEnum.EnduranceMax, (int)ManaType.Type2] = Properties[PropertyEnum.EnduranceMaxOther, (int)ManaType.Type2];
-            Properties[PropertyEnum.Endurance, (int)ManaType.Type2] = Properties[PropertyEnum.EnduranceMax, (int)ManaType.Type2];
-
-            // Secondary resource base is already present in the prototype's property collection as a curve property
-            Properties[PropertyEnum.SecondaryResourceMax] = Properties[PropertyEnum.SecondaryResourceMaxBase];
-            Properties[PropertyEnum.SecondaryResource] = Properties[PropertyEnum.SecondaryResourceMax];
-
-            // Stats
-            foreach (PrototypeId entryId in avatarProto.StatProgressionTable)
-            {
-                var entry = entryId.As<StatProgressionEntryPrototype>();
-
-                if (entry.DurabilityValue > 0)
-                    Properties[PropertyEnum.StatDurability] = entry.DurabilityValue;
-
-                if (entry.StrengthValue > 0)
-                    Properties[PropertyEnum.StatStrength] = entry.StrengthValue;
-
-                if (entry.FightingSkillsValue > 0)
-                    Properties[PropertyEnum.StatFightingSkills] = entry.FightingSkillsValue;
-
-                if (entry.SpeedValue > 0)
-                    Properties[PropertyEnum.StatSpeed] = entry.SpeedValue;
-
-                if (entry.EnergyProjectionValue > 0)
-                    Properties[PropertyEnum.StatEnergyProjection] = entry.EnergyProjectionValue;
-
-                if (entry.IntelligenceValue > 0)
-                    Properties[PropertyEnum.StatIntelligence] = entry.IntelligenceValue;
-            }
-
             // REMOVEME
             // Unlock all stealable powers for Rogue
             if (avatarProto.StealablePowersAllowed.HasValue())
@@ -171,6 +145,29 @@ namespace MHServerEmu.Games.Entities.Avatars
                 abilityKeyMapping.SlotDefaultAbilities(this);
                 _abilityKeyMappingList.Add(abilityKeyMapping);
             }
+        }
+
+        public override bool ApplyInitialReplicationState(ref EntitySettings settings)
+        {
+            if (base.ApplyInitialReplicationState(ref settings) == false)
+                return false;
+
+            ResetResources(false);
+
+            // Resurrect if dead
+            if (IsDead)
+                Resurrect();
+
+            // Restore level state by running the level up code
+            int level = CharacterLevel;
+            OnLevelUp(level, level, false);
+
+            return true;
+        }
+
+        protected override void ResurrectFromOther(WorldEntity ultimateOwner)
+        {
+            // TODO Ressurect for Avatar
         }
 
         protected override void BindReplicatedFields()
@@ -248,6 +245,39 @@ namespace MHServerEmu.Games.Entities.Avatars
 
         #region World and Positioning
 
+        public override SimulateResult SetSimulated(bool simulated)
+        {
+            SimulateResult result = base.SetSimulated(simulated);
+
+            if (result == SimulateResult.Set)
+            {
+                // TODO: Add a helper function for applying mods? (pvp / infinity / omega)
+
+                // Apply PvP upgrade bonuses
+                List<(PrototypeId, int)> pvpUpgradeList = ListPool<(PrototypeId, int)>.Instance.Get();
+
+                foreach (var kvp in Properties.IteratePropertyRange(PropertyEnum.OmegaRank))
+                {
+                    Property.FromParam(kvp.Key, 0, out PrototypeId omegaBonusProtoRef);
+                    int rank = kvp.Value;
+                    pvpUpgradeList.Add((omegaBonusProtoRef, rank));
+                }
+
+                foreach (var pvpUpgrade in pvpUpgradeList)
+                    ModChangeModEffects(pvpUpgrade.Item1, pvpUpgrade.Item2);
+
+                ListPool<(PrototypeId, int)>.Instance.Return(pvpUpgradeList);
+
+                // Apply alternate advancement (infinity / omega) bonuses
+                if (Game.InfinitySystemEnabled)
+                    ApplyInfinityBonuses();
+                else
+                    ApplyOmegaBonuses();
+            }
+
+            return result;
+        }
+
         public override bool CanMove()
         {
             if (base.CanMove() == false)
@@ -278,10 +308,16 @@ namespace MHServerEmu.Games.Entities.Avatars
 
             if (player.AOI.ContainsPosition(position.Value))
             {
+                if (flags.HasFlag(ChangePositionFlags.Teleport))
+                    DespawnPersistentAgents();
+
                 // Do a normal position change and update AOI if the position is loaded
                 result = base.ChangeRegionPosition(position, orientation, flags);
                 if (result == ChangePositionResult.PositionChanged)
                     player.AOI.Update(RegionLocation.Position);
+
+                if (flags.HasFlag(ChangePositionFlags.Teleport))
+                    RespawnPersistentAgents();
             }
             else
             {
@@ -303,6 +339,22 @@ namespace MHServerEmu.Games.Entities.Avatars
             }
 
             return result;
+        }
+
+        public override void OnKilled(WorldEntity killer, KillFlags killFlags, WorldEntity directKiller)
+        {
+            base.OnKilled(killer, killFlags, directKiller);
+
+            // Deplete resources if needed
+            foreach (PrimaryResourceManaBehaviorPrototype primaryManaBehaviorProto in GetPrimaryResourceManaBehaviors())
+            {
+                if (primaryManaBehaviorProto.DepleteOnDeath)
+                    Properties.RemoveProperty(new(PropertyEnum.Endurance, primaryManaBehaviorProto.ManaType));
+            }
+
+            SecondaryResourceManaBehaviorPrototype secondaryManaBehaviorProto = GetSecondaryResourceManaBehavior();
+            if (secondaryManaBehaviorProto != null && secondaryManaBehaviorProto.DepleteOnDeath)
+                Properties.RemoveProperty(PropertyEnum.SecondaryResource);
         }
 
         public bool DoDeathRelease(DeathReleaseRequestType requestType)
@@ -499,21 +551,237 @@ namespace MHServerEmu.Games.Entities.Avatars
             return true;
         }
 
+        public override void OnPowerEnded(Power power, EndPowerFlags flags)
+        {
+            base.OnPowerEnded(power, flags);
+
+            PowerPrototype powerProto = power.Prototype;
+            if (powerProto.DisableEnduranceRegenTypes.HasValue())
+            {
+                if (powerProto.DisableEnduranceRegenOnActivate && powerProto.DisableEnduranceRegenOnEnd == false)
+                {
+                    foreach (ManaType manaType in powerProto.DisableEnduranceRegenTypes)
+                        EnableEnduranceRegen(manaType);
+                }
+                else if (powerProto.DisableEnduranceRegenOnEnd)
+                {
+                    foreach (ManaType manaType in powerProto.DisableEnduranceRegenTypes)
+                    {
+                        // Disable endurance regen
+                        Properties[PropertyEnum.DisableEnduranceRegen, manaType] = true;
+
+                        // Schedule regen re-enablement
+                        int index = (int)manaType;
+
+                        if (_enableEnduranceRegenEvents[index] == null)
+                            _enableEnduranceRegenEvents[index] = new();
+                        else
+                            Game.GameEventScheduler?.CancelEvent(_enableEnduranceRegenEvents[index]);
+
+                        // Schedule the next update tick
+                        TimeSpan delay = TimeSpan.FromMilliseconds(GameDatabase.GlobalsPrototype.DisableEndurRegenOnPowerEndMS);
+                        ScheduleEntityEvent(_enableEnduranceRegenEvents[index], delay, manaType);
+                    }
+                }
+            }
+        }
+
         public override PowerUseResult ActivatePower(PrototypeId powerRef, ref PowerActivationSettings settings)
         {
-            PowerUseResult rusult = base.ActivatePower(powerRef, ref settings);
+            // Check if we have the power before the main validation in case there is lag
+            Power power = GetPower(powerRef);
+            if (power == null)
+                return PowerUseResult.AbilityMissing;
 
-            var player = GetOwnerOfType<Player>();
-            if (player != null) 
-                Region?.AvatarUsedPowerEvent.Invoke(new(player, this, powerRef, settings.TargetEntityId));
+            return base.ActivatePower(powerRef, ref settings);
+        }
 
-            return rusult;
+        protected override PowerUseResult ActivatePower(Power power, ref PowerActivationSettings settings)
+        {
+            PrototypeId powerRef = power.PrototypeDataRef;
+
+            // Handle edge cases related to continuous powers and conflicting inputs.
+            // In many ways this mirrors the behavior of CAvatar::TryActivatePower().
+
+            PowerUseResult result = CanActivatePower(power, settings.TargetEntityId, settings.TargetPosition, settings.Flags, settings.ItemSourceId);
+
+            Power activePower = ActivePower;
+
+            // This is a continuous power that will be activated later
+            if (result == PowerUseResult.MinimumReactivateTime && activePower != null && powerRef == ContinuousPowerDataRef)
+                return result;
+
+            if ((result == PowerUseResult.PowerInProgress || result == PowerUseResult.MinimumReactivateTime) && activePower != null)
+            {
+                // Another continuous power case that will be activated on its own later
+                if (powerRef == activePower.PrototypeDataRef && powerRef == ContinuousPowerDataRef)
+                    return result;
+
+                // Try to end the current power if it's different
+                if (powerRef != activePower.PrototypeDataRef)
+                {
+                    EndPowerFlags endPowerFlags = EndPowerFlags.ExplicitCancel | EndPowerFlags.ClientRequest;
+
+                    // Interrupt movement client-side (the client is movement authoritative for avatars)
+                    if (IsMovementAuthoritative == false && power.IsPartOfAMovementPower())
+                        endPowerFlags |= EndPowerFlags.Interrupting;
+
+                    activePower.EndPower(endPowerFlags);
+                }
+
+                // Now do this again
+                PowerUseResult secondTryResult = CanActivatePower(power, settings.TargetEntityId, settings.TargetPosition, settings.Flags, settings.ItemSourceId);
+                if (secondTryResult != PowerUseResult.Success)
+                {
+                    // If we failed to cancel the current power, try to delay the activation of the new power
+
+                    if (power.GetPowerCategory() == PowerCategoryType.NormalPower)
+                    {
+                        // This messy thing is coming straight from the client.
+                        // The end result is that we set pending action that will be activated in ActivatePostPowerAction().
+                        if (powerRef != ActivePowerRef || _pendingAction.PendingActionState != PendingActionState.WaitingForPrevPower)
+                        {
+                            // Activate the power that's non-recurring and different from the current one after the current one ends (see )
+                            if (powerRef != ActivePowerRef || power.IsRecurring() == false)
+                            {
+                                if (_pendingAction.PendingActionState != PendingActionState.WaitingForPrevPower || power.IsChannelingPower() == false || power.IsContinuous() == false)
+                                {
+                                    if (_pendingAction.PendingActionState != PendingActionState.WaitingForPrevPower || GetPowerSlot(powerRef) != AbilitySlot.PrimaryAction)
+                                    {
+                                        Vector3 targetPosition = settings.TargetPosition;
+                                        if (power.IsMovementPower())
+                                            targetPosition -= RegionLocation.Position;
+
+                                        _pendingAction.SetData(PendingActionState.WaitingForPrevPower, powerRef, settings.TargetEntityId, targetPosition, settings.ItemSourceId);
+                                        return result;
+                                    }
+                                }
+                            }
+                        }
+                        else if (secondTryResult == PowerUseResult.MinimumReactivateTime)
+                        {
+                            // Delay reactivation of this power until it's over
+                            TimeSpan timeSinceActivation = Game.CurrentTime - power.LastActivateGameTime;
+                            TimeSpan delay = power.GetActivationTime() - timeSinceActivation;
+                            DelayActivatePower(powerRef, delay, settings.TargetEntityId, settings.TargetPosition, settings.ItemSourceId);
+                            return result;
+                        }
+                    }
+                }
+                else
+                {
+                    result = secondTryResult;
+                }
+            }
+
+            // TODO: More handling
+
+            // Failed validation despite everything above, clean up and bail out
+            if (result != PowerUseResult.Success && result != PowerUseResult.TargetIsMissing)
+            {
+                // Notify the client
+                SendActivatePowerFailedMessage(powerRef, result);
+
+                // Clean up throwable powers
+                if (power.IsThrowablePower() || power.GetPowerCategory() == PowerCategoryType.ThrowableCancelPower)
+                    UnassignPower(powerRef);
+
+                return result;
+            }
+
+            // Now do the actual activation
+            result = base.ActivatePower(power, ref settings);
+
+            if (result == PowerUseResult.Success)
+            {
+                PowerPrototype powerProto = power.Prototype;
+
+                // Stop endurance regen if needed
+                if (powerProto.DisableEnduranceRegenTypes.HasValue() && powerProto.DisableEnduranceRegenOnActivate)
+                {
+                    foreach (ManaType manaType in powerProto.DisableEnduranceRegenTypes)
+                    {
+                        Properties[PropertyEnum.DisableEnduranceRegen, manaType] = true;
+
+                        // Cancel scheduled re-enablement (this will be rescheduled after the power is over)
+                        int index = (int)manaType;
+
+                        if (_enableEnduranceRegenEvents[index] != null)
+                            Game.GameEventScheduler?.CancelEvent(_enableEnduranceRegenEvents[index]);
+                    }
+                }
+
+                // Invoke the AvatarUsedPowerEvent
+                var player = GetOwnerOfType<Player>();
+                if (player != null)
+                    Region?.AvatarUsedPowerEvent.Invoke(new(player, this, powerRef, settings.TargetEntityId));
+            }
+            else
+            {
+                // Activation failed despite the validation, something went wrong
+                Logger.Warn($"ActivatePower(): Activation failed for power [{power}] on [{this}] despite passing preliminary validation!");
+                SendActivatePowerFailedMessage(powerRef, result);
+            }
+
+            return result;
+        }
+
+        public override PowerUseResult CanTriggerPower(PowerPrototype powerProto, Power power, PowerActivationSettingsFlags flags)
+        {
+            if (PendingActionState == PendingActionState.FindingLandingSpot)
+                return PowerUseResult.NoFlyingUse;
+
+            if (powerProto.Activation != PowerActivationType.Passive)
+            {
+                // Do not allow any non-passive powers other than throw cancel when we are throwing
+                Power throwablePower = GetThrowablePower();
+                if (throwablePower != null && throwablePower.Prototype != powerProto)
+                {
+                    Power throwCancelPower = GetThrowableCancelPower();
+                    if (throwCancelPower == null) return Logger.WarnReturn(PowerUseResult.GenericError, "CanTriggerPower(): throwCancelPower == null");
+                    
+                    if (throwCancelPower.Prototype != powerProto)
+                        return PowerUseResult.PowerInProgress;
+                }
+            }
+
+            // TODO: IsPowerAllowedInCurrentTransformMode()
+
+            return base.CanTriggerPower(powerProto, power, flags);
         }
 
         public override void ActivatePostPowerAction(Power power, EndPowerFlags flags)
         {
+            // Try to activate pending action (see CAvatar::ActivatePostPowerAction() for reference)
+            if (ActivePowerRef == PrototypeId.Invalid && power.IsProcEffect() == false && power.TriggersComboPowerOnEvent(PowerEventType.OnPowerEnd) == false)
+            {
+                PrototypeId pendingPowerProtoRef = _pendingAction.PowerProtoRef;
+                if (pendingPowerProtoRef != PrototypeId.Invalid && IsInPendingActionState(PendingActionState.WaitingForPrevPower))
+                {
+                    Power nextPower = GetPower(pendingPowerProtoRef);
+                    if (nextPower == null)
+                    {
+                        Logger.Warn("ActivatePostPowerAction(): nextPower == null");
+                        return;
+                    }
+
+                    PowerActivationSettings settings = new();
+                    FixupPendingActivateSettings(nextPower, ref settings);
+
+                    CancelPendingAction();
+
+                    PowerUseResult result = CanActivatePower(nextPower, settings.TargetEntityId, settings.TargetPosition);
+                    if (result == PowerUseResult.Success)
+                        ActivatePower(nextPower, ref settings);
+                    else
+                        SendActivatePowerFailedMessage(nextPower.PrototypeDataRef, result);
+                }
+            }
+
+            // Base implementation from common code below
             base.ActivatePostPowerAction(power, flags);
 
+            // Try to reactivate the current continuous power
             if (_continuousPowerData.PowerProtoRef == PrototypeId.Invalid)
                 return;
 
@@ -551,27 +819,15 @@ namespace MHServerEmu.Games.Entities.Avatars
 
             if (power == null) return Logger.WarnReturn(false, "ShouldContinueRecurringPower(): power == null");
 
-            AvatarPrototype avatarPrototype = AvatarPrototype;
-            if (avatarPrototype.PrimaryResourceBehaviors.IsNullOrEmpty())
-                return Logger.WarnReturn(false, "ShouldContinueRecurringPower(): avatarPrototype.PrimaryResourceBehaviors.IsNullOrEmpty()");
-
             // Check endurance (mana) costs
-            foreach (PrototypeId primaryManaBehaviorProtoRef in avatarPrototype.PrimaryResourceBehaviors)
+            foreach (PrimaryResourceManaBehaviorPrototype primaryManaBehaviorProto in GetPrimaryResourceManaBehaviors())
             {
-                var primaryManaBehaviorProto = primaryManaBehaviorProtoRef.As<PrimaryResourceManaBehaviorPrototype>();
-                if (primaryManaBehaviorProto == null)
-                {
-                    Logger.Warn("ShouldContinueRecurringPower(): primaryManaBehaviorProto == null");
-                    continue;
-                }
-
-                float endurance = Properties[PropertyEnum.Endurance, (int)primaryManaBehaviorProto.ManaType];
+                float endurance = Properties[PropertyEnum.Endurance, primaryManaBehaviorProto.ManaType];
                 float enduranceCost = power.GetEnduranceCost(primaryManaBehaviorProto.ManaType, true);
 
                 if (endurance < enduranceCost)
                 {
-                    flags |= EndPowerFlags.ExplicitCancel;
-                    flags |= EndPowerFlags.NotEnoughEndurance;
+                    flags |= EndPowerFlags.ExplicitCancel | EndPowerFlags.NotEnoughEndurance;
                     return false;
                 }
             }
@@ -588,11 +844,11 @@ namespace MHServerEmu.Games.Entities.Avatars
                 return false;
             }
 
-            // Check power's CanTriggerEval
+            // Check the power's CanTriggerEval
             return power.CheckCanTriggerEval();
         }
 
-        public void SetContinuousPower(PrototypeId powerProtoRef, ulong targetId, Vector3 targetPosition, uint randomSeed, bool notifyOwner = false)
+        public void SetContinuousPower(PrototypeId powerProtoRef, ulong targetId, Vector3 targetPosition, int randomSeed, bool notifyOwner)
         {
             // Validate client input
             Power power = GetPower(powerProtoRef);
@@ -620,19 +876,21 @@ namespace MHServerEmu.Games.Entities.Avatars
 
             // Notify clients
             PlayerConnectionManager networkManager = Game.NetworkManager;
-            IEnumerable<PlayerConnection> interestedClients = networkManager.GetInterestedClients(this, AOINetworkPolicyValues.AOIChannelProximity, notifyOwner == false);
-            if (interestedClients.Any() == false) return;
+            List<PlayerConnection> interestedClientList = ListPool<PlayerConnection>.Instance.Get();
+            if (networkManager.GetInterestedClients(interestedClientList, this, AOINetworkPolicyValues.AOIChannelProximity, notifyOwner == false))
+            {
+                var continuousPowerUpdateMessage = NetMessageContinuousPowerUpdateToClient.CreateBuilder()
+                    .SetIdAvatar(Id)
+                    .SetPowerPrototypeId((ulong)powerProtoRef)
+                    .SetIdTargetEntity(targetId)
+                    .SetTargetPosition(targetPosition.ToNetStructPoint3())
+                    .SetRandomSeed((uint)randomSeed)
+                    .Build();
 
-            // NOTE: Although NetMessageCancelPower is not an archive, it uses power prototype enums
-            var continuousPowerUpdateMessage = NetMessageContinuousPowerUpdateToClient.CreateBuilder()
-                .SetIdAvatar(Id)
-                .SetPowerPrototypeId((ulong)powerProtoRef)
-                .SetIdTargetEntity(targetId)
-                .SetTargetPosition(targetPosition.ToNetStructPoint3())
-                .SetRandomSeed(randomSeed)
-                .Build();
+                networkManager.SendMessageToMultiple(interestedClientList, continuousPowerUpdateMessage);
+            }
 
-            networkManager.SendMessageToMultiple(interestedClients, continuousPowerUpdateMessage);
+            ListPool<PlayerConnection>.Instance.Return(interestedClientList);
         }
 
         public void ClearContinuousPower()
@@ -721,8 +979,8 @@ namespace MHServerEmu.Games.Entities.Avatars
                             settings.Flags |= PowerActivationSettingsFlags.Continuous;
 
                             // Update random seed
-                            GRandom random = new((int)_continuousPowerData.RandomSeed);
-                            _continuousPowerData.RandomSeed = (uint)random.Next(0, 10000);
+                            GRandom random = new(_continuousPowerData.RandomSeed);
+                            _continuousPowerData.RandomSeed = random.Next(0, 10000);
 
                             // We omit ActivateContinuousPower(), continuousPower.UpdateContinuousPowerActivationSettings()
                             // and onContinuousPowerResumed becaused they are not really needed on the server.
@@ -750,7 +1008,6 @@ namespace MHServerEmu.Games.Entities.Avatars
 
         public void CancelPendingAction()
         {
-            //Logger.Debug("CancelPendingAction()");
             _pendingAction.Clear();
         }
 
@@ -758,6 +1015,20 @@ namespace MHServerEmu.Games.Entities.Avatars
         {
             // TODO: Check PropertyEnum.LastInflictedDamageTime
             return true;
+        }
+
+        public AbilitySlot GetPowerSlot(PrototypeId powerProtoRef)
+        {
+            AbilityKeyMapping keyMapping = CurrentAbilityKeyMapping;
+            if (keyMapping == null)
+                return Logger.WarnReturn(AbilitySlot.Invalid, $"GetPowerSlot(): No current keyMapping when calling GetPowerSlot [{powerProtoRef.GetName()}]");
+
+            List<AbilitySlot> abilitySlotList = ListPool<AbilitySlot>.Instance.Get();
+            keyMapping.GetActiveAbilitySlotsContainingProtoRef(powerProtoRef, abilitySlotList);
+            AbilitySlot result = abilitySlotList.Count > 0 ? abilitySlotList[0] : AbilitySlot.Invalid;
+
+            ListPool<AbilitySlot>.Instance.Return(abilitySlotList);
+            return result;
         }
 
         public PrototypeId GetOriginalPowerFromMappedPower(PrototypeId mappedPowerRef)
@@ -888,7 +1159,7 @@ namespace MHServerEmu.Games.Entities.Avatars
 
         public ulong FindAbilityItem(ItemPrototype itemProto, ulong skipItemId = InvalidId)
         {
-            List<Inventory> inventoryList = ListPool<Inventory>.Instance.Rent();
+            List<Inventory> inventoryList = ListPool<Inventory>.Instance.Get();
 
             try
             {
@@ -941,10 +1212,56 @@ namespace MHServerEmu.Games.Entities.Avatars
             }
         }
 
-        private bool AssignDefaultAvatarPowers()
+        public ulong FindOwnedItemThatGrantsPower(PrototypeId powerProtoRef)
+        {
+            ulong itemId = InvalidId;
+
+            // Search avatar equipment
+            foreach (Inventory inventory in new InventoryIterator(this, InventoryIterationFlags.Equipment))
+            {
+                itemId = FindOwnedItemThatGrantsPowerHelper(powerProtoRef, inventory);
+                if (itemId != InvalidId)
+                    return itemId;
+            }
+
+            // Search the player's general inventories
+            Player player = GetOwnerOfType<Player>();
+            if (player == null) return Logger.WarnReturn(InvalidId, "FindOwnedItemThatGrantsPower(): player == null");
+
+            foreach (Inventory inventory in new InventoryIterator(player, InventoryIterationFlags.PlayerGeneral | InventoryIterationFlags.PlayerGeneralExtra))
+            {
+                itemId = FindOwnedItemThatGrantsPowerHelper(powerProtoRef, inventory);
+                if (itemId != InvalidId)
+                    return itemId;
+            }
+
+            return itemId;
+        }
+
+        private ulong FindOwnedItemThatGrantsPowerHelper(PrototypeId powerProtoRef, Inventory inventory)
+        {
+            EntityManager entityManager = Game.EntityManager;
+
+            foreach (var entry in inventory)
+            {
+                Item item = entityManager.GetEntity<Item>(entry.Id);
+                if (item == null)
+                {
+                    Logger.Warn("FindOwnedItemThatGrantsPowerHelper(): item == null");
+                    continue;
+                }
+
+                if (item.GetPowerGranted(out PrototypeId powerGrantedProtoRef) && powerGrantedProtoRef == powerProtoRef)
+                    return item.Id;
+            }
+
+            return InvalidId;
+        }
+
+        private bool InitializePowers()
         {
             Player player = GetOwnerOfType<Player>();
-            if (player == null) return Logger.WarnReturn(false, "AssignHardcodedPowers(): player == null");
+            if (player == null) return Logger.WarnReturn(false, "InitializePowers(): player == null");
 
             PlayerPrototype playerPrototype = player.Prototype as PlayerPrototype;
             AvatarPrototype avatarPrototype = AvatarPrototype;
@@ -961,13 +1278,56 @@ namespace MHServerEmu.Games.Entities.Avatars
             AssignPower(GameDatabase.GlobalsPrototype.PetTechVacuumPower, indexProps);
             AssignPower(avatarPrototype.ResurrectOtherEntityPower, indexProps);
             AssignPower(avatarPrototype.StatsPower, indexProps);
+            ScheduleStatsPowerRefresh();
             AssignPower(GameDatabase.GlobalsPrototype.AvatarHealPower, indexProps);
 
+            // Initialize resources (TODO: Separate InitializePowers() into multiple methods and move this out of here)
+            InitializePrimaryManaBehaviors();
+            InitializeSecondaryManaBehaviors();
+
+            // Item Powers
             AssignItemPowers();
 
+            // Emotes
+            // Starting emotes
+            foreach (AbilityAssignmentPrototype emoteAssignment in playerPrototype.StartingEmotes)
+            {
+                PrototypeId emoteProtoRef = emoteAssignment.Ability;
+                if (GetPower(emoteProtoRef) != null) continue;
+                if (AssignPower(emoteProtoRef, indexProps) == null)
+                    Logger.Warn($"InitializePowers(): Failed to assign starting emote {GameDatabase.GetPrototypeName(emoteProtoRef)} to {this}");
+            }
+
+            // Unlockable emotes
+            foreach (var kvp in player.Properties.IteratePropertyRange(PropertyEnum.AvatarEmoteUnlocked, PrototypeDataRef))
+            {
+                Property.FromParam(kvp.Key, 1, out PrototypeId emoteProtoRef);
+                if (GetPower(emoteProtoRef) != null) continue;
+                if (AssignPower(emoteProtoRef, indexProps) == null)
+                    Logger.Warn($"InitializePowers(): Failed to assign unlockable emote {GameDatabase.GetPrototypeName(emoteProtoRef)} to {this}");
+            }
+
+            // Assign hidden passive powers (these need to be assigned before progression table powers)
+            if (avatarPrototype.HiddenPassivePowers.HasValue())
+            {
+                foreach (AbilityAssignmentPrototype abilityAssignmentProto in avatarPrototype.HiddenPassivePowers)
+                {
+                    if (GetPower(abilityAssignmentProto.Ability) == null)
+                        AssignPower(abilityAssignmentProto.Ability, indexProps);
+                }
+            }
+
             // Progression table powers
-            foreach (var powerProgressionEntry in avatarPrototype.GetPowersUnlockedAtLevel(-1, true))
-                AssignPower(powerProgressionEntry.PowerAssignment.Ability, indexProps);
+            indexProps = new(1, CharacterLevel, CombatLevel);   // use rank 1 for power progression (todo: remove this when we have everything working properly)
+
+            List<PowerProgressionEntryPrototype> powerProgEntryList = ListPool<PowerProgressionEntryPrototype>.Instance.Get();
+            if (avatarPrototype.GetPowersUnlockedAtLevel(powerProgEntryList, -1, true))
+            {
+                foreach (PowerProgressionEntryPrototype powerProgEntry in powerProgEntryList)
+                    AssignPower(powerProgEntry.PowerAssignment.Ability, indexProps);
+            }
+
+            ListPool<PowerProgressionEntryPrototype>.Instance.Return(powerProgEntryList);
 
             // Mapped powers (power replacements from talents)
             // AvatarPrototype -> TalentGroups -> Talents -> Talent -> ActionsTriggeredOnPowerEvent -> PowerEventContext -> MappedPower
@@ -996,39 +1356,51 @@ namespace MHServerEmu.Games.Entities.Avatars
                 foreach (PrototypeId stealablePowerInfoProtoRef in avatarPrototype.StealablePowersAllowed)
                 {
                     var stealablePowerInfo = stealablePowerInfoProtoRef.As<StealablePowerInfoPrototype>();
+                    
+                    // Skip assigning stealable passives for now
+                    PowerPrototype powerProto = stealablePowerInfo.Power.As<PowerPrototype>();
+                    if (powerProto.Activation == PowerActivationType.Passive)
+                        continue;
+
                     AssignPower(stealablePowerInfo.Power, indexProps);
                 }
-            }
-
-            // Assign hidden passive powers
-            if (avatarPrototype.HiddenPassivePowers.HasValue())
-            {
-                foreach (AbilityAssignmentPrototype abilityAssignmentProto in avatarPrototype.HiddenPassivePowers)
-                    AssignPower(abilityAssignmentProto.Ability, indexProps);
             }
 
             // Travel
             AssignPower(avatarPrototype.TravelPower, indexProps);
 
-            // Emotes
-            // Starting emotes
-            foreach (AbilityAssignmentPrototype emoteAssignment in playerPrototype.StartingEmotes)
+            return true;
+        }
+
+        private bool RestoreSelfAppliedPowerConditions()
+        {
+            // Powers are unassigned when avatar exits world, but the conditions remain.
+            // We need to reconnect existing conditions to the newly reassigned powers.
+
+            ConditionCollection conditionCollection = ConditionCollection;
+            if (conditionCollection == null) return Logger.WarnReturn(false, "RestoreSelfAppliedPowerConditions(): conditionCollection == null");
+
+            List<ulong> conditionCleanupList = ListPool<ulong>.Instance.Get();
+
+            // Try to restore condition connections for self-applied powers
+            foreach (Condition condition in ConditionCollection.IterateConditions(false))
             {
-                PrototypeId emoteProtoRef = emoteAssignment.Ability;
-                if (GetPower(emoteProtoRef) != null) continue;
-                if (AssignPower(emoteProtoRef, indexProps) == null)
-                    Logger.Warn($"AssignDefaultAvatarPowers(): Failed to assign starting emote {GameDatabase.GetPrototypeName(emoteProtoRef)} to {this}");
+                PowerPrototype powerProto = condition.CreatorPowerPrototype;
+                if (powerProto == null)
+                    continue;
+
+                if (Power.GetTargetingShape(powerProto) != TargetingShapeType.Self)
+                    continue;
+
+                if (conditionCollection.TryRestorePowerCondition(condition, this) == false)
+                    conditionCleanupList.Add(condition.Id);
             }
 
-            // Unlockable emotes
-            foreach (var kvp in player.Properties.IteratePropertyRange(PropertyEnum.AvatarEmoteUnlocked, PrototypeDataRef))
-            {
-                Property.FromParam(kvp.Key, 1, out PrototypeId emoteProtoRef);
-                if (GetPower(emoteProtoRef) != null) continue;
-                if (AssignPower(emoteProtoRef, indexProps) == null)
-                    Logger.Warn($"AssignDefaultAvatarPowers(): Failed to assign unlockable emote {GameDatabase.GetPrototypeName(emoteProtoRef)} to {this}");
-            }
+            // Clean up conditions that are no longer valid
+            foreach (ulong conditionId in conditionCleanupList)
+                conditionCollection.RemoveCondition(conditionId);
 
+            ListPool<ulong>.Instance.Return(conditionCleanupList);
             return true;
         }
 
@@ -1038,7 +1410,7 @@ namespace MHServerEmu.Games.Entities.Avatars
             Player playerOwner = GetOwnerOfType<Player>();
             if (playerOwner == null) return Logger.WarnReturn(false, "AssignItemPowers(): playerOwner == null");
 
-            List<Inventory> inventoryList = ListPool<Inventory>.Instance.Rent();
+            List<Inventory> inventoryList = ListPool<Inventory>.Instance.Get();
 
             try
             {
@@ -1115,13 +1487,480 @@ namespace MHServerEmu.Games.Entities.Avatars
             }
         }
 
+        private void AssignRegionPowers()
+        {
+            Region region = Region;
+            if (region == null)
+                return;
+
+            // Assign and activate region powers
+            PowerIndexProperties indexProps = new(0, CharacterLevel, CombatLevel);
+            
+            foreach (var kvp in region.Properties.IteratePropertyRange(PropertyEnum.RegionAvatarPower))
+            {
+                Property.FromParam(kvp.Key, 0, out PrototypeId powerProtoRef);
+                if (powerProtoRef == PrototypeId.Invalid)
+                    continue;
+
+                if (AssignPower(powerProtoRef, indexProps) == null)
+                    continue;
+
+                // Force activate this power
+                PowerActivationSettings settings = new(Id, Vector3.Zero, RegionLocation.Position);
+                settings.Flags |= PowerActivationSettingsFlags.NotifyOwner;
+
+                if (ActivatePower(powerProtoRef, ref settings) != PowerUseResult.Success)
+                    Logger.Warn($"AssignRegionPowers(): Failed to activate power {powerProtoRef.GetName()} in region [{region}]");
+            }
+
+            // Assign metagame bodyslide overrides (e.g. for PvP)
+            EntityManager entityManager = Game.EntityManager;
+            foreach (ulong metaGameId in Region.MetaGames)
+            {
+                MetaGame metaGame = entityManager.GetEntity<MetaGame>(metaGameId);
+                if (metaGame == null)
+                    continue;
+
+                MetaGamePrototype metaGameProto = metaGame.MetaGamePrototype;
+                if (metaGameProto == null || metaGameProto.BodysliderOverride == PrototypeId.Invalid)
+                    continue;
+
+                AssignPower(metaGameProto.BodysliderOverride, new());
+            }
+        }
+
+        protected override bool CanThrow(WorldEntity throwableEntity)
+        {
+            if (throwableEntity == null) return Logger.WarnReturn(false, "CanThrow(): throwableEntity == null");
+
+            PrototypeId throwablePowerProtoRef = throwableEntity.Properties[PropertyEnum.ThrowablePower];
+            PowerPrototype throwablePowerProto = throwablePowerProtoRef.As<PowerPrototype>();
+            if (throwablePowerProto == null) return Logger.WarnReturn(false, "CanThrow(): throwableEntity == null");
+
+            bool success = true;
+
+            // Validate
+            success &= IsAliveInWorld;
+            success &= IsExecutingPower == false;
+            success &= throwableEntity.IsThrowableBy(this);
+            success &= InInteractRange(throwableEntity, InteractionMethod.Throw);
+            success &= CanTriggerPower(throwablePowerProto, null, PowerActivationSettingsFlags.None) == PowerUseResult.Success;
+
+            // Cancel the throw power on the client to prevent it from getting stuck
+            if (success == false)
+                SendActivatePowerFailedMessage(throwablePowerProtoRef, PowerUseResult.GenericError);
+            
+            return success;
+        }
+
+        private int GetThrowability()
+        {
+            using EvalContextData evalContext = ObjectPoolManager.Instance.Get<EvalContextData>();
+            evalContext.SetReadOnlyVar_PropertyCollectionPtr(EvalContext.Default, Properties);
+            evalContext.SetReadOnlyVar_ProtoRefVectorPtr(EvalContext.Var1, Keywords);
+
+            return Eval.RunInt(GameDatabase.AdvancementGlobalsPrototype.AvatarThrowabilityEvalPrototype, evalContext);
+        }
+
+        private bool FixupPendingActivateSettings(Power power, ref PowerActivationSettings settings)
+        {
+            settings.TargetEntityId = _pendingAction.TargetId;
+            settings.TargetPosition = _pendingAction.TargetPosition;
+            settings.UserPosition = RegionLocation.Position;
+            settings.PowerRandomSeed = Game.Random.Next(1, 10000);
+
+            if (power.Prototype is MovementPowerPrototype movementPowerProto)
+            {
+                WorldEntity target = Game.EntityManager.GetEntity<WorldEntity>(settings.TargetEntityId);
+                if (target == null)
+                    settings.TargetPosition += RegionLocation.Position;
+                else
+                    settings.TargetPosition = target.RegionLocation.Position;
+            }
+
+            if (power.IsInRange(settings.TargetPosition, RangeCheckType.Activation) == false)
+            {
+                PowerPrototype powerProto = power.Prototype;
+                if (powerProto == null) return Logger.WarnReturn(false, "FixupPendingActivateSettings(): powerProto == null");
+
+                if (powerProto.WhenOutOfRange == WhenOutOfRangeType.ActivateInDirection ||
+                    (powerProto.WhenOutOfRange == WhenOutOfRangeType.MoveIfTargetingMOB && settings.TargetEntityId == InvalidId))
+                {
+                    Vector3 userPosition = RegionLocation.Position;
+                    Vector3 direction = Vector3.SafeNormalize(settings.TargetPosition - userPosition);
+                    settings.TargetPosition = userPosition + (direction * power.GetRange());
+                }
+            }
+
+            return true;
+        }
+
+        private bool DelayActivatePower(PrototypeId powerProtoRef, TimeSpan delay, ulong targetId, Vector3 targetPosition, ulong sourceItemId)
+        {
+            if (_pendingAction.SetData(PendingActionState.DelayedPowerActivate, powerProtoRef, targetId, targetPosition, sourceItemId) == false)
+                return false;
+
+            EventScheduler scheduler = Game.GameEventScheduler;
+
+            if (_delayedPowerActivationEvent.IsValid)
+                scheduler.CancelEvent(_delayedPowerActivationEvent);
+
+            ScheduleEntityEvent(_delayedPowerActivationEvent, delay);
+
+            return true;
+        }
+
+        private bool DelayedPowerActivation()
+        {
+            if (IsInPendingActionState(PendingActionState.DelayedPowerActivate) == false)
+                return false;
+
+            ulong targetId = _pendingAction.TargetId;
+            Vector3 targetPosition = _pendingAction.TargetPosition;
+            ulong sourceItemId = _pendingAction.SourceItemId;
+            Power power = GetPower(_pendingAction.PowerProtoRef);
+
+            CancelPendingAction();
+
+            if (power == null)
+                return false;
+
+            if (CanActivatePower(power, targetId, targetPosition, PowerActivationSettingsFlags.None, sourceItemId) != PowerUseResult.Success)
+                return false;
+
+            PowerActivationSettings settings = new(targetId, targetPosition, RegionLocation.Position);
+            settings.ItemSourceId = sourceItemId;
+
+            ActivatePower(power.PrototypeDataRef, ref settings);
+
+            return true;
+        }
+
+        private bool SendActivatePowerFailedMessage(PrototypeId powerProtoRef, PowerUseResult result)
+        {
+            Player player = GetOwnerOfType<Player>();
+            if (player == null) return Logger.WarnReturn(false, "SendActivatePowerFailedMessage(): player == null");
+
+            if (player.InterestedInEntity(this, AOINetworkPolicyValues.AOIChannelOwner))
+            {
+                NetMessageActivatePowerFailed activatePowerFailedMessage = NetMessageActivatePowerFailed.CreateBuilder()
+                    .SetAvatarIndex(0)  // TODO: Console couch co-op
+                    .SetPowerPrototypeId((ulong)powerProtoRef)
+                    .SetReason((uint)result)
+                    .Build();
+
+                player.SendMessage(activatePowerFailedMessage);
+            }
+
+            return true;
+        }
+
+        private void ScheduleStatsPowerRefresh()
+        {
+            EventScheduler scheduler = Game.GameEventScheduler;
+            scheduler.CancelEvent(_refreshStatsPowerEvent);
+            ScheduleEntityEvent(_refreshStatsPowerEvent, TimeSpan.Zero);
+        }
+
+        private bool RefreshStatsPower()
+        {
+            if (IsInWorld == false)
+                return false;
+
+            Power statsPower = GetPower(AvatarPrototype.StatsPower);
+            if (statsPower == null) return Logger.WarnReturn(false, "RefreshStatsPower(): statsPower == null");
+
+            // Reactivate the stats power to force it to recalculate the condition it applies
+            statsPower.EndPower(EndPowerFlags.ExplicitCancel | EndPowerFlags.Force);
+
+            Vector3 position = RegionLocation.Position;
+            PowerActivationSettings settings = new(Id, position, position);
+            ActivatePower(statsPower, ref settings);
+
+            return true;
+        }
+
+        #endregion
+
+        #region Resources
+
+        public bool CanGainOrRegenEndurance(ManaType manaType)
+        {
+            if (Properties[PropertyEnum.ForceEnduranceRegen, manaType])
+                return true;
+
+            return Properties[PropertyEnum.DisableEnduranceGain, manaType] == false &&
+                   Properties[PropertyEnum.DisableEnduranceRegen, manaType] == false;
+        }
+
+        public bool ResetResources(bool avatarSwap)
+        {
+            // Primary resources
+            foreach (PrimaryResourceManaBehaviorPrototype primaryManaBehaviorProto in GetPrimaryResourceManaBehaviors())
+            {
+                ManaType manaType = primaryManaBehaviorProto.ManaType;
+                float endurance = primaryManaBehaviorProto.StartsEmpty ? 0f : Properties[PropertyEnum.EnduranceMax, manaType];
+                Properties[PropertyEnum.Endurance, manaType] = endurance;
+            }
+
+            // Secondary resources
+            SecondaryResourceManaBehaviorPrototype secondaryResourceManaBehaviorProto = GetSecondaryResourceManaBehavior();
+            if (secondaryResourceManaBehaviorProto == null)
+                return true;
+            
+            if (avatarSwap == false || secondaryResourceManaBehaviorProto.ResetOnAvatarSwap)
+            {
+                float secondaryResource = secondaryResourceManaBehaviorProto.StartsEmpty ? 0f : Properties[PropertyEnum.SecondaryResourceMax];
+                Properties[PropertyEnum.SecondaryResource] = secondaryResource;
+            }
+
+            return true;
+        }
+
+        private bool InitializePrimaryManaBehaviors()
+        {
+            foreach (PrimaryResourceManaBehaviorPrototype primaryManaBehaviorProto in GetPrimaryResourceManaBehaviors())
+            {
+                ManaType manaType = primaryManaBehaviorProto.ManaType;
+
+                // Set base value
+                Curve manaCurve = GameDatabase.GetCurve(primaryManaBehaviorProto.BaseEndurancePerLevel);
+                if (manaCurve == null)
+                {
+                    Logger.Warn("InitializePrimaryResources(): manaCurve == null");
+                    continue;
+                }
+
+                Properties[PropertyEnum.EnduranceBase, manaType] = manaCurve.GetAt(CharacterLevel);
+
+                // Restore to full if needed
+                if (primaryManaBehaviorProto.StartsEmpty == false)
+                    Properties[PropertyEnum.Endurance, manaType] = Properties[PropertyEnum.EnduranceMax, manaType];
+
+                // Start regen
+                Properties[PropertyEnum.DisableEnduranceRegen, manaType] = primaryManaBehaviorProto.StartsWithRegenEnabled == false;
+
+                // Do common mana init
+                AssignManaBehaviorPowers(primaryManaBehaviorProto);
+            }
+
+            return true;
+        }
+
+        private bool InitializeSecondaryManaBehaviors()
+        {
+            // Secondary resource base is already present in the prototype's property collection as a curve property
+            SecondaryResourceManaBehaviorPrototype secondaryManaBehaviorProto = GetSecondaryResourceManaBehavior();
+            if (secondaryManaBehaviorProto == null)
+                return false;
+
+            AssignManaBehaviorPowers(secondaryManaBehaviorProto);
+            return true;
+        }
+
+        private bool AssignManaBehaviorPowers(ManaBehaviorPrototype manaBehaviorProto)
+        {
+            if (manaBehaviorProto.Powers.IsNullOrEmpty())
+                return true;
+
+            PowerIndexProperties indexProps = new(0, CharacterLevel, CombatLevel);
+
+            foreach (PrototypeId powerProtoRef in manaBehaviorProto.Powers)
+            {
+                if (GetPower(powerProtoRef) == null)
+                {
+                    if (AssignPower(powerProtoRef, indexProps) == null)
+                        Logger.Warn($"InitializeManaBehaviorPowers(): Failed to assign mana behavior power {powerProtoRef.GetName()} to [{this}]");
+                }
+            }
+
+            return true;
+        }
+
+        public PrimaryResourceManaBehaviorPrototype[] GetPrimaryResourceManaBehaviors()
+        {
+            PrimaryResourceManaBehaviorPrototype[] behaviors = AvatarPrototype?.PrimaryResourceBehaviorsCache;
+
+            // Check if there are any primary resource behaviors (there should be!)
+            if (behaviors.IsNullOrEmpty())
+                return Logger.WarnReturn(Array.Empty<PrimaryResourceManaBehaviorPrototype>(), $"GetPrimaryResourceManaBehaviors(): behaviors.IsNullOrEmpty()");
+
+            return behaviors;
+        }
+
+        private PrimaryResourceManaBehaviorPrototype GetPrimaryResourceManaBehavior(ManaType manaType)
+        {
+            PrimaryResourceManaBehaviorPrototype[] behaviors = AvatarPrototype?.PrimaryResourceBehaviorsCache;
+            if (behaviors.IsNullOrEmpty())
+                return Logger.WarnReturn<PrimaryResourceManaBehaviorPrototype>(null, $"GetPrimaryResourceManaBehaviors(): behaviors.IsNullOrEmpty()");
+
+            foreach (PrimaryResourceManaBehaviorPrototype primaryManaBehaviorProto in behaviors)
+            {
+                if (primaryManaBehaviorProto.ManaType == manaType)
+                    return primaryManaBehaviorProto;
+            }
+
+            return null;
+        }
+
+        private SecondaryResourceManaBehaviorPrototype GetSecondaryResourceManaBehavior()
+        {
+            PrototypeId secondaryResourceOverrideProtoRef = Properties[PropertyEnum.SecondaryResourceOverride];
+            if (secondaryResourceOverrideProtoRef != PrototypeId.Invalid)
+                return secondaryResourceOverrideProtoRef.As<SecondaryResourceManaBehaviorPrototype>();
+
+            return AvatarPrototype?.SecondaryResourceBehaviorCache;
+        }
+
+        private float GetEnduranceMax(ManaType manaType)
+        {
+            float enduranceMax = Properties[PropertyEnum.EnduranceBase, manaType];
+            enduranceMax *= 1f + Properties[PropertyEnum.EndurancePctBonus, manaType];
+            enduranceMax += Properties[PropertyEnum.EnduranceAddBonus, manaType];
+            enduranceMax += Properties[PropertyEnum.EnduranceAddBonus, ManaType.TypeAll];
+            return enduranceMax;
+        }
+
+        private bool EnableEnduranceRegen(ManaType manaType)
+        {
+            // NOTE: Validation in GetPrimaryResourceManaBehavior() will ensure that we won't get an invalid mana type index here
+            PrimaryResourceManaBehaviorPrototype primaryManaBehaviorProto = GetPrimaryResourceManaBehavior(manaType);
+            if (primaryManaBehaviorProto == null) return Logger.WarnReturn(false, "EnableEnduranceRegen(): primaryManaBehaviorProto == null");
+
+            // Remove the flag that prevents endurance regen
+            Properties.RemoveProperty(new(PropertyEnum.DisableEnduranceRegen, manaType));
+
+            // Initialize or reset the update event pointer for this mana type
+            int index = (int)manaType;
+
+            if (_updateEnduranceEvents[index] == null)
+                _updateEnduranceEvents[index] = new();
+            else
+                Game.GameEventScheduler?.CancelEvent(_updateEnduranceEvents[index]);
+
+            // Schedule the next update
+            TimeSpan regenUpdateTime = TimeSpan.FromMilliseconds(primaryManaBehaviorProto.RegenUpdateTimeMS);
+            ScheduleEntityEvent(_updateEnduranceEvents[index], regenUpdateTime, manaType);
+
+            return true;
+        }
+
+        private void CancelEnduranceEvents()
+        {
+            EventScheduler scheduler = Game.GameEventScheduler;
+            
+            foreach (var enableEvent in _enableEnduranceRegenEvents)
+            {
+                if (enableEvent != null)
+                    scheduler.CancelEvent(enableEvent);
+            }
+
+            foreach (var updateEvent in _updateEnduranceEvents)
+            {
+                if (updateEvent != null)
+                    scheduler.CancelEvent(updateEvent);
+            }
+        }
+
+        private bool UpdateEndurance(ManaType manaType)
+        {
+            // NOTE: Validation in GetPrimaryResourceManaBehavior() will ensure that we won't get an invalid mana type index here
+            PrimaryResourceManaBehaviorPrototype primaryManaBehaviorProto = GetPrimaryResourceManaBehavior(manaType);
+            if (primaryManaBehaviorProto == null) return Logger.WarnReturn(false, "UpdateEndurance(): primaryManaBehaviorProto == null");
+
+            // Run the regen eval if regen is enabled
+            EvalPrototype evalProto = primaryManaBehaviorProto.EvalOnEnduranceUpdate;
+            if (CanGainOrRegenEndurance(manaType) && evalProto != null)
+            {
+                using EvalContextData evalContext = ObjectPoolManager.Instance.Get<EvalContextData>();
+                evalContext.SetVar_PropertyCollectionPtr(EvalContext.Default, Properties);
+                evalContext.SetVar_PropertyCollectionPtr(EvalContext.Entity, Properties);
+
+                if (Eval.RunBool(evalProto, evalContext) == false)
+                    Logger.Warn($"UpdateEndurance(): The following EvalOnEnduranceUpdate failed:\nEval: [{evalProto.ExpressionString()}]");
+            }
+
+            // Initialize or reset the update event pointer for this mana type
+            int index = (int)manaType;
+
+            if (_updateEnduranceEvents[index] == null)
+                _updateEnduranceEvents[index] = new();
+            else
+                Game.GameEventScheduler?.CancelEvent(_updateEnduranceEvents[index]);
+
+            // Schedule the next update
+            TimeSpan regenUpdateTime = TimeSpan.FromMilliseconds(primaryManaBehaviorProto.RegenUpdateTimeMS);
+            ScheduleEntityEvent(_updateEnduranceEvents[index], regenUpdateTime, manaType);
+
+            return true;
+        }
+
+        #endregion
+
+        #region Conditions
+
+        /// <summary>
+        /// Pauses or unpauses boost <see cref="Condition"/> instances applied to this <see cref="Avatar"/>.
+        /// </summary>
+        public void UpdateBoostConditionPauseState(bool pause)
+        {
+            if (pause)
+            {
+                foreach (Condition condition in ConditionCollection)
+                {
+                    if (condition.IsBoost() == false)
+                        continue;
+
+                    if (condition.IsPaused)
+                        continue;
+
+                    ConditionCollection.PauseCondition(condition, true);
+                }
+            }
+            else
+            {
+                foreach (Condition condition in ConditionCollection)
+                {
+                    if (condition.IsBoost() == false)
+                        continue;
+
+                    if (condition.IsPaused == false)
+                        continue;
+
+                    ConditionCollection.UnpauseCondition(condition, true);
+                }
+            }
+        }
+
         #endregion
 
         #region Progression
 
         public override long AwardXP(long amount, bool showXPAwardedText)
         {
+            Player player = GetOwnerOfType<Player>();
+            if (player == null) return Logger.WarnReturn(0L, "AwardXP(): player == null");
+
             long awardedAmount = base.AwardXP(amount, showXPAwardedText);
+
+            // Award alternate advancement XP (omega or infinity)
+            // TODO: Remove the cosmic prestige experience penalty for omega / infinity
+            if (Game.InfinitySystemEnabled)
+            {
+                float infinityLiveTuningMult = 1f;
+                if (LiveTuningManager.GetLiveGlobalTuningVar(GlobalTuningVar.eGTV_RespectLevelForInfinityXP) == 0f || player.CanUseLiveTuneBonuses())
+                    infinityLiveTuningMult = Math.Max(LiveTuningManager.GetLiveGlobalTuningVar(GlobalTuningVar.eGTV_InfinityXPPct), 0f);
+
+                player.AwardInfinityXP((long)(amount * infinityLiveTuningMult), true);
+            }
+            else
+            {
+                float omegaLiveTuningMult = 1f;
+                if (LiveTuningManager.GetLiveGlobalTuningVar(GlobalTuningVar.eGTV_RespectLevelForOmegaXP) == 0f || player.CanUseLiveTuneBonuses())
+                    omegaLiveTuningMult = Math.Max(LiveTuningManager.GetLiveGlobalTuningVar(GlobalTuningVar.eGTV_OmegaXPPct), 0f);
+
+                player.AwardOmegaXP((long)(amount * omegaLiveTuningMult), true);
+            }
 
             // Award XP to the equipped legendary item if there is one
             Inventory legendaryInventory = GetInventory(InventoryConvenienceLabel.AvatarLegendary);
@@ -1221,25 +2060,84 @@ namespace MHServerEmu.Games.Entities.Avatars
             // Live tuning
             xpMult *= GetLiveTuningXPMultiplier();
 
-            return (long)MathF.Round(xp * xpMult);
+            return (long)(xp * xpMult);
         }
 
-        protected override bool OnLevelUp(int oldLevel, int newLevel)
+        protected override bool OnLevelUp(int oldLevel, int newLevel, bool restoreHealthAndEndurance = true)
         {
-            Properties[PropertyEnum.Health] = Properties[PropertyEnum.HealthMaxOther];
+            AvatarPrototype avatarProto = AvatarPrototype;
+            if (avatarProto == null) return Logger.WarnReturn(false, "OnLevelUp(): avatarProto == null");
 
-            // Slot unlocked default abilities
-            AbilityKeyMapping currentAbilityKeyMapping = CurrentAbilityKeyMapping;
-            if (CurrentAbilityKeyMapping != null)
+            // Check stat changes (this code also runs to initialize stats in ApplyInitialReplicationState())
+            bool statsChanged = false;
+            if (avatarProto.StatProgressionTable.HasValue())
             {
-                foreach (HotkeyData hotkeyData in currentAbilityKeyMapping.GetDefaultAbilities(this, oldLevel))
+                foreach (PrototypeId statProgressionEntryProtoRef in avatarProto.StatProgressionTable)
                 {
-                    Logger.Debug($"OnLevelUp(): {hotkeyData}");
-                    currentAbilityKeyMapping.SetAbilityInAbilitySlot(hotkeyData.AbilityProtoRef, hotkeyData.AbilitySlot);
+                    StatProgressionEntryPrototype statProgressionEntryProto = statProgressionEntryProtoRef.As<StatProgressionEntryPrototype>();
+                    if (statProgressionEntryProto == null)
+                    {
+                        Logger.Warn("OnLevelUp(): statProgressionEntryProto == null");
+                        continue;
+                    }
+
+                    if (newLevel < statProgressionEntryProto.Level)
+                        continue;
+
+                    statsChanged |= statProgressionEntryProto.TryUpdateStats(Properties);
                 }
             }
 
+            // Stat refreshes are scheduled on stat changes, but even if our stats didn't change,
+            // we still need to refresh here, because some stats use avatar level in their formulas.
+            if (statsChanged == false)
+                ScheduleStatsPowerRefresh();
+
+            // Notify clients
             SendLevelUpMessage();
+
+            // Restore health if needed
+            if (restoreHealthAndEndurance && IsDead == false)
+                Properties[PropertyEnum.Health] = Properties[PropertyEnum.HealthMax];
+
+            // Update endurance
+            foreach (PrimaryResourceManaBehaviorPrototype primaryManaBehaviorProto in GetPrimaryResourceManaBehaviors())
+            {
+                ManaType manaType = primaryManaBehaviorProto.ManaType;
+
+                // Update the base value
+                Curve manaCurve = GameDatabase.GetCurve(primaryManaBehaviorProto.BaseEndurancePerLevel);
+                if (manaCurve == null)
+                {
+                    Logger.Warn("OnLevelUp(): manaCurve == null");
+                    continue;
+                }
+
+                Properties[PropertyEnum.EnduranceBase, manaType] = manaCurve.GetAt(newLevel);
+
+                // Restore to max if needed
+                if (restoreHealthAndEndurance && primaryManaBehaviorProto.RestoreToMaxOnLevelUp && IsDead == false)
+                    Properties[PropertyEnum.Endurance, manaType] = Properties[PropertyEnum.EnduranceMax, manaType];
+            }
+
+            if (IsInWorld)
+            {
+                // Slot ALL default abilities
+                // (this is dumb, but we have to do this to avoid desync with the client, see CAvatar::autoSlotPowers())
+                AbilityKeyMapping currentAbilityKeyMapping = CurrentAbilityKeyMapping;
+                if (CurrentAbilityKeyMapping != null)
+                {
+                    List<HotkeyData> hotkeyDataList = ListPool<HotkeyData>.Instance.Get();
+                    if (currentAbilityKeyMapping.GetDefaultAbilities(hotkeyDataList, this))
+                    {
+                        // TODO: Avatar.SlotAbility()
+                        foreach (HotkeyData hotkeyData in hotkeyDataList)
+                            currentAbilityKeyMapping.SetAbilityInAbilitySlot(hotkeyData.AbilityProtoRef, hotkeyData.AbilitySlot);
+                    }
+
+                    ListPool<HotkeyData>.Instance.Return(hotkeyDataList);
+                }
+            }
 
             var player = GetOwnerOfType<Player>();
             if (player == null) return false;
@@ -1278,6 +2176,10 @@ namespace MHServerEmu.Games.Entities.Avatars
             Agent teamUpAgent = CurrentTeamUpAgent;
             if (teamUpAgent != null)
                 teamUpAgent.CombatLevel = combatLevel;
+
+            Agent cotrolledAgent = ControlledAgent;
+            if (cotrolledAgent != null)
+                cotrolledAgent.CombatLevel = combatLevel;
         }
 
         #endregion
@@ -1469,10 +2371,10 @@ namespace MHServerEmu.Games.Entities.Avatars
                 {
                     Logger.Warn($"OnOtherEntityAddedToMyInventory(): Failed to assign item power {powerProtoRef.GetName()} to avatar {this}");
                     return;
-                }
-
-                OnChangeInventory(item);
+                }                
             }
+            
+            OnChangeInventory(item);
         }
 
         public override void OnOtherEntityRemovedFromMyInventory(Entity entity, InventoryLocation invLoc)
@@ -1517,6 +2419,85 @@ namespace MHServerEmu.Games.Entities.Avatars
             }
         }
 
+        protected override bool InitInventories(bool populateInventories)
+        {
+            bool success = base.InitInventories(populateInventories);
+
+            AvatarPrototype avatarProto = AvatarPrototype;
+            foreach (AvatarEquipInventoryAssignmentPrototype equipInvAssignment in avatarProto.EquipmentInventories)
+            {
+                if (AddInventory(equipInvAssignment.Inventory, populateInventories ? equipInvAssignment.LootTable : PrototypeId.Invalid) == false)
+                {
+                    success = false;
+                    Logger.Warn($"InitInventories(): Failed to add inventory {GameDatabase.GetPrototypeName(equipInvAssignment.Inventory)} to {this}");
+                }
+            }
+
+            return success;
+        }
+
+        #endregion
+
+        #region Costumes
+
+        public override AssetId GetEntityWorldAsset()
+        {
+            AssetId result = AssetId.Invalid;
+
+            TransformModePrototype transformModeProto = CurrentTransformMode.As<TransformModePrototype>();
+            if (transformModeProto != null)
+            {
+                if (transformModeProto.UnrealClassOverrides.HasValue())
+                {
+                    AssetId currentCostumeAssetRef = GetCurrentCostumeAssetRef();
+
+                    foreach (TransformModeUnrealOverridePrototype overrideProto in transformModeProto.UnrealClassOverrides)
+                    {
+                        if (overrideProto.IncomingUnrealClass == AssetId.Invalid)
+                        {
+                            Logger.Warn("GetEntityWorldAsset(): overrideProto.IncomingUnrealClass == AssetId.Invalid");
+                            continue;
+                        }
+
+                        if (overrideProto.IncomingUnrealClass == currentCostumeAssetRef)
+                        {
+                            result = overrideProto.TransformedUnrealClass;
+                            break;
+                        }
+                    }
+                }
+
+                if (result == AssetId.Invalid)
+                    result = transformModeProto.UnrealClass;
+            }
+            else
+            {
+                result = GetCurrentCostumeAssetRef();
+            }
+
+            if (result == AssetId.Invalid)
+                Logger.Warn($"GetEntityWorldAsset(): Unable to get a valid unreal class asset for avatar [{this}]");
+
+            return result;
+        }
+
+        public AssetId GetCurrentCostumeAssetRef()
+        {
+            // HACK: Return starting costume for Entity/Items/Costumes/Costume.defaults to avoid spam when forcing pre-VU costumes
+            CostumePrototype equippedCostume = EquippedCostume;
+            if (equippedCostume != null && equippedCostume.DataRef != (PrototypeId)10774581141289766864)
+                return equippedCostume.CostumeUnrealClass;
+
+            return GetStartingCostumeAssetRef();
+        }
+
+        public AssetId GetStartingCostumeAssetRef()
+        {
+            AvatarPrototype avatarProto = AvatarPrototype;
+            if (avatarProto == null) return Logger.WarnReturn(AssetId.Invalid, "GetStartingCostumeAssetRef(): avatarProto == null");
+            return avatarProto.GetStartingCostumeAssetRef(Platforms.PC);
+        }
+
         public bool ChangeCostume(PrototypeId costumeProtoRef)
         {
             CostumePrototype costumeProto = null;
@@ -1539,23 +2520,6 @@ namespace MHServerEmu.Games.Entities.Avatars
             owner.Properties[PropertyEnum.AvatarLibraryCostume, 0, PrototypeDataRef] = costumeProtoRef;
 
             return true;
-        }
-
-        protected override bool InitInventories(bool populateInventories)
-        {
-            bool success = base.InitInventories(populateInventories);
-
-            AvatarPrototype avatarProto = AvatarPrototype;
-            foreach (AvatarEquipInventoryAssignmentPrototype equipInvAssignment in avatarProto.EquipmentInventories)
-            {
-                if (AddInventory(equipInvAssignment.Inventory, populateInventories ? equipInvAssignment.LootTable : PrototypeId.Invalid) == false)
-                {
-                    success = false;
-                    Logger.Warn($"InitInventories(): Failed to add inventory {GameDatabase.GetPrototypeName(equipInvAssignment.Inventory)} to {this}");
-                }
-            }
-
-            return success;
         }
 
         #endregion
@@ -1602,7 +2566,7 @@ namespace MHServerEmu.Games.Entities.Avatars
         {
             float stackingExperienceBonusPct = 0f;
 
-            foreach (var kvp in properties.IteratePropertyRange(PropertyEnum.LootBonusRarityStackCount))
+            foreach (var kvp in properties.IteratePropertyRange(PropertyEnum.ExperienceBonusStackCount))
             {
                 Property.FromParam(kvp.Key, 0, out PrototypeId powerProtoRef);
                 int stackCount = kvp.Value;
@@ -1837,86 +2801,167 @@ namespace MHServerEmu.Games.Entities.Avatars
 
         #endregion
 
-        #region Omega and Infinity
-
-        public long GetInfinityPointsSpentOnBonus(PrototypeId infinityGemBonusRef, bool getTempPoints)
-        {
-            if (getTempPoints)
-            {
-                long pointsSpent = Properties[PropertyEnum.InfinityPointsSpentTemp, infinityGemBonusRef];
-                if (pointsSpent >= 0) return pointsSpent;
-            }
-
-            return Properties[PropertyEnum.InfinityPointsSpentTemp, infinityGemBonusRef];
-        }
-
-        public int GetOmegaPointsSpentOnBonus(PrototypeId omegaBonusRef, bool getTempPoints)
-        {
-            if (getTempPoints)
-            {
-                int pointsSpent = Properties[PropertyEnum.OmegaSpecTemp, omegaBonusRef];
-                if (pointsSpent >= 0) return pointsSpent;
-            }
-
-            return Properties[PropertyEnum.OmegaSpec, omegaBonusRef];
-        }
-
-        #endregion
-
         #region Team-Ups
 
         public void SelectTeamUpAgent(PrototypeId teamUpProtoRef)
         {
+            if (Game.GameOptions.TeamUpSystemEnabled == false || IsInWorld == false) return;
+
             if (teamUpProtoRef == PrototypeId.Invalid || IsTeamUpAgentUnlocked(teamUpProtoRef) == false) return;
-            Agent currentTeamUp = CurrentTeamUpAgent;
-            if (currentTeamUp != null)
-                if (currentTeamUp.IsInWorld || currentTeamUp.PrototypeDataRef == teamUpProtoRef) return;
+            var teamUpProto = GameDatabase.GetPrototype<WorldEntityPrototype>(teamUpProtoRef);
+            if (teamUpProto.IsLiveTuningEnabled() == false) return;
+
+            Agent oldTeamUp = CurrentTeamUpAgent;
+            if (oldTeamUp != null)
+                if (oldTeamUp.IsInWorld || oldTeamUp.PrototypeDataRef == teamUpProtoRef) return;
 
             Properties[PropertyEnum.AvatarTeamUpAgent] = teamUpProtoRef;
-            LinkTeamUpAgent(CurrentTeamUpAgent);
             Player player = GetOwnerOfType<Player>();
             player.Properties[PropertyEnum.AvatarLibraryTeamUp, 0, Prototype.DataRef] = teamUpProtoRef;
 
-            // TODO affixes, event PlayerActivatedTeamUpGameEvent
+            if (oldTeamUp != null)
+            {
+                oldTeamUp.AssignTeamUpAgentPowers();
+                oldTeamUp.RemoveTeamUpAffixesFromAvatar(this);
+            }
+
+            var currentTeamUp = CurrentTeamUpAgent;
+            if (currentTeamUp == null) return;
+
+            SetOwnerTeamUpAgent(currentTeamUp);
+            currentTeamUp.AssignTeamUpAgentPowers();
+            currentTeamUp.ApplyTeamUpAffixesToAvatar(this);
+            currentTeamUp.SetTeamUpsAtMaxLevel(player);
+
+            // event PlayerActivatedTeamUpGameEvent not used in missions
         }
 
-        public void SummonTeamUpAgent()
+        public void SummonTeamUpAgent(TimeSpan duration)
         {
-            Agent teamUp = CurrentTeamUpAgent;
-            if (teamUp == null) return;
-            if (teamUp.IsInWorld) return;
+            if (Game.GameOptions.TeamUpSystemEnabled == false) return;
+            if (IsInWorld == false) return;
 
-            Properties[PropertyEnum.AvatarTeamUpIsSummoned] = true;
-            Properties[PropertyEnum.AvatarTeamUpStartTime] = (long)Game.CurrentTime.TotalMilliseconds;
-            //Power power = GetPower(TeamUpPowerRef);
-            //Properties[PropertyEnum.AvatarTeamUpDuration] = power.GetCooldownDuration();
+            Agent teamUpAgent = CurrentTeamUpAgent;
+            if (teamUpAgent == null || teamUpAgent.IsLiveTuningEnabled == false) return;
 
-            ActivateTeamUpAgent(true);
+            if (teamUpAgent.IsInWorld) 
+            {
+                if (teamUpAgent.IsDead == false) return;
+                else DespawnTeamUpAgent();
+            }
+
+            // schedule Dissmiss event
+            if (_dismissTeamUpAgentEvent.IsValid) return;
+
+            var scheduler = Game.GameEventScheduler;
+            if (scheduler == null) return;
+            scheduler.CancelEvent(_dismissTeamUpAgentEvent);
+
+            if (duration > TimeSpan.Zero && teamUpAgent.IsPermanentTeamUpStyle() == false)
+                ScheduleEntityEvent(_dismissTeamUpAgentEvent, duration);
+
+            SetTeamUpAgentDuration(true, Game.CurrentTime, duration);
+
+            SpawnTeamUpAgent(true);
+
+            TryActivateOnSummonPetProcs(teamUpAgent);
         }
 
-        public bool ClearSummonedTeamUpAgent(Agent teamUpAgent)
+        private void SpawnTeamUpAgent(bool newOnServer)
         {
-            if (teamUpAgent != CurrentTeamUpAgent)
-                return Logger.WarnReturn(false, "CleanUpSummonedTeamUpAgent(): teamUpAgent != CurrentTeamUpAgent");
+            Agent teamUpAgent = CurrentTeamUpAgent;
+            if (teamUpAgent == null) return;
 
-            Properties.RemoveProperty(PropertyEnum.AvatarTeamUpIsSummoned);
-            Properties.RemoveProperty(PropertyEnum.AvatarTeamUpStartTime);
-            //Properties.RemoveProperty(PropertyEnum.AvatarTeamUpDuration);
+            // Resurrect or restore team-up health
+            if (teamUpAgent.IsDead)
+                teamUpAgent.Resurrect();
+            else
+                teamUpAgent.Properties[PropertyEnum.Health] = teamUpAgent.Properties[PropertyEnum.HealthMax];
 
+            teamUpAgent.RevealEquipmentToOwner();
+            teamUpAgent.SetAsPersistent(this, newOnServer);
+            teamUpAgent.AssignTeamUpAgentPowers();
+            teamUpAgent.SetSummonedAllianceOverride(Alliance);
+        }
+
+        private bool RespawnTeamUpAgent()
+        {
+            if (IsInWorld == false) return false;
+            var teamUp = CurrentTeamUpAgent;
+            if (teamUp == null || teamUp.IsInWorld) return false;
+            if (Properties[PropertyEnum.AvatarTeamUpIsSummoned] == false) return false;
+
+            var scheduler = Game.GameEventScheduler;
+            if (scheduler == null) return false;
+            scheduler.CancelEvent(_dismissTeamUpAgentEvent);
+
+            TimeSpan duration = Properties[PropertyEnum.AvatarTeamUpDuration];
+            if (duration > TimeSpan.Zero && teamUp.IsPermanentTeamUpStyle() == false)
+            {
+                TimeSpan startTime = Properties[PropertyEnum.AvatarTeamUpStartTime];
+                TimeSpan time = duration - (Game.CurrentTime - startTime);
+
+                if (time <= TimeSpan.Zero)
+                {
+                    ResetTeamUpAgentDuration();
+                    return false;
+                }
+                ScheduleEntityEvent(_dismissTeamUpAgentEvent, time);
+            }
+            SpawnTeamUpAgent(false);
             return true;
         }
 
-        public void DismissTeamUpAgent()
+        private void DespawnTeamUpAgent()
         {
-            Agent teamUp = CurrentTeamUpAgent;
-            if (teamUp == null) return;
-            if (teamUp.IsAliveInWorld)
+            var teamup = CurrentTeamUpAgent;
+            if (teamup == null) return;
+
+            if (teamup.IsInWorld) teamup.ExitWorld();
+            else teamup.SetDormant(true);
+        }
+
+        public void DismissTeamUpAgent(bool reset)
+        {
+            if (IsInWorld == false) return;
+
+            if (reset) ResetTeamUpAgentDuration();
+
+            Agent teamUpAgent = CurrentTeamUpAgent;
+            if (teamUpAgent == null) return;
+
+            if (teamUpAgent.IsAliveInWorld)
             {
-                teamUp.Kill();
+                bool isSummoned = Properties[PropertyEnum.AvatarTeamUpIsSummoned];
+                TimeSpan startTime = Properties[PropertyEnum.AvatarTeamUpStartTime];
+                TimeSpan duration = Properties[PropertyEnum.AvatarTeamUpDuration];
+
+                teamUpAgent.Kill();
+
+                if (reset == false) 
+                    SetTeamUpAgentDuration(isSummoned, startTime, duration);
+            }
+            else
+            {
+                DespawnTeamUpAgent();
             }
         }
 
-        public void LinkTeamUpAgent(Agent teamUpAgent)
+        private void SetTeamUpAgentDuration(bool isSummoned, TimeSpan startTime, TimeSpan duration)
+        {
+            Properties[PropertyEnum.AvatarTeamUpIsSummoned] = isSummoned;
+            Properties[PropertyEnum.AvatarTeamUpStartTime] = startTime;
+            Properties[PropertyEnum.AvatarTeamUpDuration] = duration;
+        }
+
+        public void ResetTeamUpAgentDuration()
+        {
+            Properties.RemoveProperty(PropertyEnum.AvatarTeamUpIsSummoned);
+            Properties.RemoveProperty(PropertyEnum.AvatarTeamUpStartTime);
+            Properties.RemoveProperty(PropertyEnum.AvatarTeamUpDuration);
+        }
+
+        public void SetOwnerTeamUpAgent(Agent teamUpAgent)
         {
             Properties[PropertyEnum.AvatarTeamUpAgentId] = teamUpAgent.Id;
             teamUpAgent.Properties[PropertyEnum.TeamUpOwnerId] = Id;
@@ -1937,48 +2982,536 @@ namespace MHServerEmu.Games.Entities.Avatars
             return player?.GetTeamUpAgent(teamUpProtoRef);
         }
 
+        public void OnEnteredWorldTeamUpAgent()
+        {
+            var player = GetOwnerOfType<Player>();
+            player?.UpdateScoringEventContext();
+        }
+
+        public void OnExitedWorldTeamUpAgent(Agent teamUpAgent)
+        {
+            var player = GetOwnerOfType<Player>();
+            if (player == null) return;
+
+            var scheduler = Game?.GameEventScheduler;
+            if (scheduler == null) return;
+            scheduler.CancelEvent(_dismissTeamUpAgentEvent);
+
+            teamUpAgent.AssignTeamUpAgentPowers();
+            teamUpAgent.SetDormant(true);
+
+            player.UpdateScoringEventContext();
+        }
+
+        public void TryTeamUpStyleSelect(uint styleIndex)
+        {
+            var scheduler = Game?.GameEventScheduler;
+            if (scheduler == null) return;
+
+            var teamUpAgent = CurrentTeamUpAgent;
+            if (teamUpAgent == null) return;
+
+            if (teamUpAgent.Prototype is not AgentTeamUpPrototype teamUpProto) return;
+            if (teamUpProto.Styles.IsNullOrEmpty()) return;
+            if (styleIndex < 0 || styleIndex >= teamUpProto.Styles.Length) return;
+
+            if (styleIndex == teamUpAgent.Properties[PropertyEnum.TeamUpStyle]) return;
+
+            bool oldStyle = teamUpAgent.IsPermanentTeamUpStyle();
+            teamUpAgent.Properties[PropertyEnum.TeamUpStyle] = styleIndex;
+            bool newStyle = teamUpAgent.IsPermanentTeamUpStyle();
+            teamUpAgent.AssignTeamUpAgentPowers();
+
+            if (newStyle)
+            {
+                scheduler.CancelEvent(_dismissTeamUpAgentEvent);
+            }
+            else if (oldStyle && IsInWorld)
+            {
+                TimeSpan duration = Properties[PropertyEnum.AvatarTeamUpDuration];
+                if (duration > TimeSpan.Zero)
+                {
+                    Properties[PropertyEnum.AvatarTeamUpStartTime] = Game.CurrentTime;
+                    scheduler.CancelEvent(_dismissTeamUpAgentEvent);
+                    ScheduleEntityEvent(_dismissTeamUpAgentEvent, duration);
+                }
+            }
+        }
+
+        #endregion
+
+        #region PersistentAgents
+
         private Agent GetCurrentVanityPet()
         {
             var keywordGlobals = GameDatabase.KeywordGlobalsPrototype;
             if (keywordGlobals == null) return Logger.WarnReturn((Agent)null, "GetCurrentVanityPet(): keywordGlobals == null");
 
-            var manager = Game.EntityManager;
-            foreach (var inventory in GetInventory(InventoryConvenienceLabel.Summoned))
-            {
-                var summoned = manager.GetEntity<Agent>(inventory.Id);
-                if (summoned != null && summoned.HasKeyword(keywordGlobals.VanityPetKeyword))
-                    return summoned;
-            }
+            foreach (var summoned in new SummonedEntityIterator(this))
+                if (summoned is Agent pet && pet.HasKeyword(keywordGlobals.VanityPetKeyword))
+                    return pet;
+
             return null;
         }
 
-        private void ActivateTeamUpAgent(bool playIntro)
+        private void RespawnPersistentAgents()
         {
-            Agent teamUp = CurrentTeamUpAgent;
-            if (teamUp == null) return;
+            if (RespawnTeamUpAgent() == false)
+            {
+                var teamUpAgent = CurrentTeamUpAgent;
+                if (teamUpAgent != null)
+                {
+                    SetOwnerTeamUpAgent(teamUpAgent);
+                    teamUpAgent.AssignTeamUpAgentPowers();
+                }
+            }
 
-            // Resurrect or restore team-up health
-            if (teamUp.IsDead)
-                teamUp.Resurrect();
-            else
-                teamUp.Properties[PropertyEnum.Health] = teamUp.Properties[PropertyEnum.HealthMax];
+            var controlledInventory = ControlledInventory;
+            if (controlledInventory != null && controlledInventory.Count > 1)
+                RemoveControlledAgentsFromInventory();
 
-            using EntitySettings settings = ObjectPoolManager.Instance.Get<EntitySettings>();
-            if (playIntro)
-                settings.OptionFlags = EntitySettingsOptionFlags.IsNewOnServer | EntitySettingsOptionFlags.IsClientEntityHidden;
+            if (ControlledAgentHasSummonDuration() == false)
+                SummonControlledAgentWithDuration();
 
-            teamUp.EnterWorld(RegionLocation.Region, teamUp.GetPositionNearAvatar(this), RegionLocation.Orientation, settings);
-            teamUp.AIController.Blackboard.PropertyCollection[PropertyEnum.AIAssistedEntityID] = Id; // link to owner
+            if (IsInTown()) SetSummonWithLifespanRemaining();
         }
 
-        private void DeactivateTeamUpAgent()
+        private void DespawnPersistentAgents()
         {
-            CurrentTeamUpAgent?.ExitWorld();
+            DespawnTeamUpAgent();
+            DespawnControlledAgent();
+            ResetSummonWithLifespanRemaining();
+        }
+
+        private void SetSummonWithLifespanRemaining()
+        {
+            foreach (var summoned in new SummonedEntityIterator(this))
+                if (summoned.Properties[PropertyEnum.SummonedEntityIsRegionPersisted])
+                {
+                    summoned.SetAsPersistent(this, false);
+                    summoned.Properties[PropertyEnum.DetachOnContainerDestroyed] = true;
+
+                    var lifespan = TimeSpan.FromMilliseconds((int)summoned.Properties[PropertyEnum.SummonLifespanRemainingMS]);
+                    if (lifespan > TimeSpan.Zero)
+                    {
+                        summoned.ResetLifespan(lifespan);
+                        summoned.Properties.RemoveProperty(PropertyEnum.SummonLifespanRemainingMS);
+                    }
+                }
+        }
+
+        private void ResetSummonWithLifespanRemaining()
+        {
+            foreach (var summoned in new SummonedEntityIterator(this))
+                if (summoned.Properties[PropertyEnum.SummonedEntityIsRegionPersisted])
+                {
+                    var lifespan = summoned.GetRemainingLifespan();
+                    if (lifespan > TimeSpan.Zero)
+                    {
+                        summoned.Properties[PropertyEnum.SummonLifespanRemainingMS] = (long)lifespan.TotalMilliseconds;
+                    }
+                    summoned.Properties[PropertyEnum.DetachOnContainerDestroyed] = false;
+                    summoned.ExitWorld();
+                }
+        }
+
+        public void SummonControlledAgentWithDuration()
+        {
+            if (IsControlPowerSlot() == false) return;
+
+            var scheduler = Game.GameEventScheduler;
+            if (scheduler == null) return;
+
+            var controlled = ControlledAgent;
+            if (controlled == null) return;
+
+            var aiGlobals = GameDatabase.AIGlobalsPrototype;
+
+            if (controlled.HasKeyword(aiGlobals.CantBeControlledKeyword))
+            {
+                RemoveControlledAgentFromInventory(controlled);
+                KillControlledAgent(controlled, KillFlags.None);
+            }
+            else
+            {
+                controlled.Properties[PropertyEnum.AIMasterAvatarDbGuid] = DatabaseUniqueId;
+                controlled.SetAsPersistent(this, false);
+
+                if (ControlledAgentHasSummonDuration())
+                {
+                    scheduler.CancelEvent(_despawnControlledEvent);
+                    var duration = TimeSpan.FromMilliseconds(aiGlobals.ControlledAgentSummonDurationMS);
+                    ScheduleEntityEvent(_despawnControlledEvent, duration);
+                }
+            }
+        }
+
+        private void DespawnControlledAgent()
+        {
+            var scheduler = Game?.GameEventScheduler;
+            if (scheduler == null) return;
+
+            scheduler.CancelEvent(_despawnControlledEvent);
+
+            var controlled = ControlledAgent;
+            if (controlled == null) return;
+
+            controlled.KillSummonedOnOwnerDeath();
+            controlled.ExitWorld();
+        }
+
+        public void RemoveAndKillControlledAgent()
+        {
+            var controlled = ControlledAgent;
+            if (controlled == null) return;
+
+            if (controlled.IsDestroyed || controlled.TestStatus(EntityStatus.PendingDestroy)) return;
+
+            RemoveControlledAgentFromInventory(controlled);
+            KillControlledAgent(controlled, KillFlags.Release);
+        }
+
+        private void KillControlledAgent(Agent controlled, KillFlags killFlags)
+        {
+            if (controlled.IsDestroyed || controlled.TestStatus(EntityStatus.PendingDestroy)) return;
+            if (controlled.IsAliveInWorld)
+            {
+                if (killFlags.HasFlag(KillFlags.Release))
+                    TryActivateOnControlledEntityReleasedProcs(controlled);
+
+                controlled.Kill(null, killFlags);
+            }
+            else
+            {
+                controlled.Destroy();
+            }
+        }
+
+        private bool ControlledAgentHasSummonDuration()
+        {
+            var controlledAgent = ControlledAgent;
+            return controlledAgent != null && controlledAgent.Properties.HasProperty(PropertyEnum.ControlledAgentHasSummonDur);
+        }
+
+        private void RemoveControlledAgentsFromInventory()
+        {
+            List<Agent> destroyList = ListPool<Agent>.Instance.Get();
+
+            var manager = Game.EntityManager;
+            foreach (var entry in ControlledInventory)
+            {
+                var controlled = manager.GetEntity<Agent>(entry.Id);
+                if (controlled == null) continue;
+                destroyList.Add(controlled);
+            }
+
+            foreach (var controlled in destroyList)
+                if (controlled.IsDestroyed == false && controlled.TestStatus(EntityStatus.PendingDestroy) == false)
+                {
+                    RemoveControlledAgentFromInventory(controlled);
+                    controlled.Destroy();
+                }
+
+            ListPool<Agent>.Instance.Return(destroyList);
+        }
+
+        private void RemoveControlledAgentFromInventory(Agent controlled)
+        {
+            if (controlled.IsOwnedBy(Id) == false) return;
+            if (controlled.IsDestroyed || controlled.TestStatus(EntityStatus.PendingDestroy)) return;
+
+            controlled.Properties.RemoveProperty(PropertyEnum.AIMasterAvatarDbGuid);
+
+            if (controlled.InventoryLocation.IsValid)
+                controlled.ChangeInventoryLocation(null);
+        }
+
+        public bool IsControlPowerSlot()
+        {
+            var keyMapping = CurrentAbilityKeyMapping;
+            if (keyMapping == null) return false;
+
+            // TODO Crypto do this
+
+            return true;
+        }
+
+        public Agent GetControlledAgent()
+        {
+            Agent controlledAgent = null;
+            var controlledInventory = ControlledInventory;
+            if (controlledInventory != null)
+            {
+                if (controlledInventory.Count > 1)
+                    Logger.Warn($"Avatar has multiple controlled entities! Avatar: {ToString()}");
+
+                var controlledId = controlledInventory.GetAnyEntity();
+                if (controlledId != InvalidId)
+                {
+                    controlledAgent = Game.EntityManager.GetEntity<Agent>(controlledId);
+                    if (controlledAgent == null)
+                        Logger.Warn("Controlled agent is null!");
+                }
+            }
+            return controlledAgent;
+        }
+
+        public bool SetControlledAgent(Agent controlled)
+        {
+            var controlledInventory = ControlledInventory;
+            if (controlledInventory == null) return false;
+
+            RemoveAndKillControlledAgent();
+
+            if (controlledInventory.Count > 0) return false;
+
+            controlled.Properties[PropertyEnum.AIMasterAvatarDbGuid] = DatabaseUniqueId;
+
+            controlled.AwardKillLoot(this, KillFlags.None, this);
+            controlled.SpawnSpec?.Defeat(this, true);
+
+            controlled.DestroyEntityActionComponent();
+            controlled.CancelDestroyEvent();
+
+            var keywordSummonDuration = GameDatabase.KeywordGlobalsPrototype.ControlledSummonDurationKeyword;
+            if (keywordSummonDuration == PrototypeId.Invalid) return false;
+
+            bool hasSummonDuration = controlled.HasConditionWithKeyword(keywordSummonDuration);
+
+            if (controlled.IsDead && hasSummonDuration == false)
+                controlled.Properties[PropertyEnum.Health] = controlled.Properties[PropertyEnum.HealthMax];
+
+            controlled.SetControlledProperties(this);
+            controlled.Properties[PropertyEnum.PowerUserOverrideID] = Id;
+            controlled.CombatLevel = CombatLevel;
+
+            var rankRef = controlled.Properties[PropertyEnum.Rank];
+            var rankProto = GameDatabase.GetPrototype<RankPrototype>(rankRef);
+            if (rankProto.IsRankChampionOrEliteOrMiniBoss)
+                controlled.Properties[PropertyEnum.MobRankOverride] = rankRef;
+
+            var result = controlled.ChangeInventoryLocation(controlledInventory);
+            if (result == InventoryResult.Success)
+            {
+                var invLocation = controlled.InventoryLocation;
+                var message = NetMessageInventoryMove.CreateBuilder()
+                            .SetEntityId(controlled.Id)
+                            .SetInvLocContainerEntityId(invLocation.ContainerId)
+                            .SetInvLocInventoryPrototypeId((ulong)invLocation.InventoryRef)
+                            .SetInvLocSlot(invLocation.Slot)
+                            .SetRequiredNoOwnerOnClient(false)
+                            .Build();
+                Game.NetworkManager.SendMessageToInterested(message, this, AOINetworkPolicyValues.AOIChannelOwner);
+            }
+            else
+            {
+                controlled.Kill();
+            }
+
+            if (hasSummonDuration)
+            {
+                controlled.Properties[PropertyEnum.ControlledAgentHasSummonDur] = true;
+                var scheduler = Game.GameEventScheduler;
+                if (scheduler == null) return false;
+                scheduler.CancelEvent(_despawnControlledEvent);
+                ScheduleEntityEvent(_despawnControlledEvent, TimeSpan.Zero);
+            }
+
+            return result == InventoryResult.Success;
+        }
+
+        public int RemoveSummonedAgentsWithKeywords(float count, KeywordsMask keywordsMask)
+        {
+            int removed = 0;
+
+            List<WorldEntity> summons = ListPool<WorldEntity>.Instance.Get();
+
+            foreach (var summoned in new SummonedEntityIterator(this))
+            {
+                if (summoned.IsDead) continue;
+                if (summoned.IsDestroyed || summoned.TestStatus(EntityStatus.PendingDestroy)) continue;
+
+                if (summoned.KeywordsMask.TestAll(keywordsMask))
+                {
+                    summons.Add(summoned);
+                    removed++;
+                }
+
+                if (removed != 0 && removed == count) break;
+            }
+
+            var killFlags = KillFlags.NoExp | KillFlags.NoLoot | KillFlags.NoDeadEvent;
+            foreach (var summoned in summons)
+                summoned.Kill(null, killFlags);
+
+            ListPool<WorldEntity>.Instance.Return(summons);
+
+            return removed;
         }
 
         #endregion
 
+
         #region Event Handlers
+
+        public override void OnPropertyChange(PropertyId id, PropertyValue newValue, PropertyValue oldValue, SetPropertyFlags flags)
+        {
+            base.OnPropertyChange(id, newValue, oldValue, flags);
+            if (flags.HasFlag(SetPropertyFlags.Refresh)) return;
+
+            int manaTypeValue;
+            ManaType manaType;
+
+            switch (id.Enum)
+            {
+                case PropertyEnum.OmegaRank:
+                case PropertyEnum.InfinityGemBonusRank:
+                case PropertyEnum.PvPUpgrades:
+                    if (IsSimulated)
+                    {
+                        Property.FromParam(id, 0, out PrototypeId modProtoRef);
+                        if (modProtoRef == PrototypeId.Invalid)
+                        {
+                            Logger.Warn("OnPropertyChange(): modProtoRef == PrototypeId.Invalid");
+                            return;
+                        }
+
+                        ModChangeModEffects(modProtoRef, newValue);
+                    }
+                    break;
+
+                case PropertyEnum.Knockback:
+                case PropertyEnum.Knockdown:
+                case PropertyEnum.Knockup:
+                case PropertyEnum.Mesmerized:
+                case PropertyEnum.Stunned:
+                case PropertyEnum.StunnedByHitReact:
+                    if (newValue == true)
+                    {
+                        // Clear pending actions / continuous powers on loss of control
+                        if (IsInPendingActionState(PendingActionState.WaitingForPrevPower) || IsInPendingActionState(PendingActionState.AfterPowerMove))
+                            CancelPendingAction();
+
+                        SetContinuousPower(PrototypeId.Invalid, _continuousPowerData.TargetId, Vector3.Zero, 0, true);
+                    }
+                        
+                    break;
+
+                case PropertyEnum.AllianceOverride:
+                case PropertyEnum.Confused:
+
+                    var alliance = Alliance;
+                    ControlledAgent?.SetSummonedAllianceOverride(alliance);
+                    CurrentTeamUpAgent?.SetSummonedAllianceOverride(alliance);
+                    break;
+
+                case PropertyEnum.PetHealthPctBonus:
+                case PropertyEnum.PetDamagePctBonus:
+
+                    var controlledAgent = ControlledAgent;
+                    if (controlledAgent != null)
+                    {
+                        controlledAgent.Properties[PropertyEnum.PetHealthPctBonus] = Properties[PropertyEnum.PetHealthPctBonus];
+                        controlledAgent.Properties[PropertyEnum.PetDamagePctBonus] = Properties[PropertyEnum.PetDamagePctBonus];
+                    }
+                    break;
+
+                case PropertyEnum.EnduranceAddBonus:
+                case PropertyEnum.EnduranceBase:
+                case PropertyEnum.EndurancePctBonus:
+                    Property.FromParam(id, 0, out manaTypeValue);
+                    manaType = (ManaType)manaTypeValue;
+
+                    if (manaType == ManaType.TypeAll)
+                    {
+                        // Update max for all mana types
+                        foreach (PrimaryResourceManaBehaviorPrototype primaryManaBehaviorProto in GetPrimaryResourceManaBehaviors())
+                        {
+                            ManaType protoManaType = primaryManaBehaviorProto.ManaType;
+                            Properties[PropertyEnum.EnduranceMax, protoManaType] = GetEnduranceMax(protoManaType);
+                        }
+                    }
+                    else
+                    {
+                        // Update max just for the mana type that was affected
+                        Properties[PropertyEnum.EnduranceMax, manaType] = GetEnduranceMax(manaType);
+                    }
+
+                    break;
+
+                case PropertyEnum.EnduranceMax:
+                    Property.FromParam(id, 0, out manaTypeValue);
+                    manaType = (ManaType)manaTypeValue;
+
+                    // Rescale current endurance
+                    if (IsAliveInWorld && flags.HasFlag(SetPropertyFlags.Deserialized) == false)
+                    {
+                        float endurance = Properties[PropertyEnum.Endurance, manaType];
+
+                        // 0 max endurance is treated as having full endurance (this will be reset to 0 later if needed)
+                        float ratio = oldValue > 0f ? Math.Min(endurance / oldValue, 1f) : 1f;
+                        Properties[PropertyEnum.Endurance, manaType] = newValue * ratio;
+                    }
+
+                    // Update client value
+                    Properties[PropertyEnum.EnduranceMaxOther, manaType] = newValue;
+                    break;
+
+                case PropertyEnum.SecondaryResource:
+                    TryActivateOnSecondaryResourceValueChangeProcs(newValue);
+                    break;
+
+                case PropertyEnum.SecondaryResourcePips:
+                    TryActivateOnSecondaryResourcePipsChangeProcs(newValue, oldValue);
+                    break;
+
+                case PropertyEnum.SecondaryResourceMax:
+                    // Clamp current value to new max
+                    float secondaryResourceMax = newValue;
+                    if (secondaryResourceMax != 0f && secondaryResourceMax < Properties[PropertyEnum.SecondaryResource])
+                        Properties[PropertyEnum.SecondaryResource] = secondaryResourceMax;
+                    break;
+
+                case PropertyEnum.SecondaryResourceMaxBase:
+                    Properties[PropertyEnum.SecondaryResourceMax] = (float)newValue + Properties[PropertyEnum.SecondaryResourceMaxChange];
+                    break;
+
+                case PropertyEnum.SecondaryResourceMaxChange:
+                    Properties[PropertyEnum.SecondaryResourceMax] = Properties[PropertyEnum.SecondaryResourceMaxBase] + (float)newValue;
+                    break;
+
+                case PropertyEnum.SecondaryResourceMaxPipsBase:
+                    Properties[PropertyEnum.SecondaryResourceMaxPips] = (int)newValue + Properties[PropertyEnum.SecondaryResourceMaxPipsChg];
+                    break;
+
+                case PropertyEnum.SecondaryResourceMaxPipsChg:
+                    Properties[PropertyEnum.SecondaryResourceMaxPips] = Properties[PropertyEnum.SecondaryResourceMaxPipsBase] + (int)newValue;
+                    break;
+
+                case PropertyEnum.StatAllModifier:
+                case PropertyEnum.StatDurability:
+                case PropertyEnum.StatDurabilityDmgPctPerPoint:
+                case PropertyEnum.StatDurabilityModifier:
+                case PropertyEnum.StatStrength:
+                case PropertyEnum.StatStrengthDmgPctPerPoint:
+                case PropertyEnum.StatStrengthModifier:
+                case PropertyEnum.StatFightingSkills:
+                case PropertyEnum.StatFightingSkillsDmgPctPerPoint:
+                case PropertyEnum.StatFightingSkillsModifier:
+                case PropertyEnum.StatSpeed:
+                case PropertyEnum.StatSpeedDmgPctPerPoint:
+                case PropertyEnum.StatSpeedModifier:
+                case PropertyEnum.StatEnergyProjection:
+                case PropertyEnum.StatEnergyDmgPctPerPoint:
+                case PropertyEnum.StatEnergyProjectionModifier:
+                case PropertyEnum.StatIntelligence:
+                case PropertyEnum.StatIntelligenceDmgPctPerPoint:
+                case PropertyEnum.StatIntelligenceModifier:
+                    if (IsInWorld)
+                        ScheduleStatsPowerRefresh();
+                    break;
+            }
+        }
 
         public override void OnAreaChanged(RegionLocation oldLocation, RegionLocation newLocation)
         {
@@ -2044,20 +3577,51 @@ namespace MHServerEmu.Games.Entities.Avatars
                 return;
             }
 
+            Region region = Region;
+            if (region == null)
+            {
+                Logger.Warn("OnEnteredWorld(): region == null");
+                return;
+            }
+
             player.UpdateScoringEventContext();
+
+            var teamUpAgent = CurrentTeamUpAgent;
+            if (teamUpAgent != null)
+            {
+                if (teamUpAgent.IsLiveTuningEnabled)
+                {
+                    SetOwnerTeamUpAgent(teamUpAgent);
+                    teamUpAgent.ApplyTeamUpAffixesToAvatar(this);
+                }
+                else
+                    Properties.RemoveProperty(PropertyEnum.AvatarTeamUpAgent);
+            }
 
             base.OnEnteredWorld(settings);
 
             Properties[PropertyEnum.AvatarTimePlayedStart] = Game.CurrentTime;
 
-            AssignDefaultAvatarPowers();
+            // Enable primary resource regen (this will be disabled by mana behavior initialization if needed)
+            foreach (PrimaryResourceManaBehaviorPrototype primaryManaBehaviorProto in GetPrimaryResourceManaBehaviors())
+                EnableEnduranceRegen(primaryManaBehaviorProto.ManaType);
 
-            // auto unlock chapters and Waypoinst
+            // Assign powers
+            InitializePowers();
+
+            if (Game.InfinitySystemEnabled)
+                InitializeInfinityBonuses();
+            else
+                InitializeOmegaBonuses();
+
+            RestoreSelfAppliedPowerConditions();     // This needs to happen after we assign powers
+            UpdateBoostConditionPauseState(region.PausesBoostConditions());
+
+            // Unlock chapters and waypoints that should be unlocked by default
             player.UnlockChapters();
             player.UnlockWaypoints();
 
-            var region = Region;
-            var regionProto = region?.Prototype;
+            RegionPrototype regionProto = region.Prototype;
             if (regionProto != null)
             {
                 var waypointRef = regionProto.WaypointAutoUnlock;
@@ -2077,6 +3641,13 @@ namespace MHServerEmu.Games.Entities.Avatars
                 missionManager.UpdateMissionInterest();
             }
 
+            // summoner condition
+            foreach (var summon in new SummonedEntityIterator(this))
+                summon.AddSummonerCondition(Id);
+
+            // Finish the switch (if there was one)
+            player.Properties.RemovePropertyRange(PropertyEnum.AvatarSwitchPending);
+
             // update achievement score
             player.AchievementManager.UpdateScore();
 
@@ -2084,12 +3655,11 @@ namespace MHServerEmu.Games.Entities.Avatars
             AreaOfInterest aoi = player.AOI;
             aoi.Update(RegionLocation.Position, true);
 
-            if (Properties[PropertyEnum.AvatarTeamUpAgent] != PrototypeId.Invalid)
-            {
-                LinkTeamUpAgent(CurrentTeamUpAgent);
-                if (Properties[PropertyEnum.AvatarTeamUpIsSummoned])
-                    ActivateTeamUpAgent(true);  // We may want to disable the intro animation in some cases
-            }
+            // Assign region passive powers (e.g. min health tutorial power)
+            AssignRegionPowers();
+
+            // Spawn team-up / controlled entities
+            RespawnPersistentAgents();
 
             if (regionProto != null)
             {
@@ -2111,19 +3681,30 @@ namespace MHServerEmu.Games.Entities.Avatars
 
             // Clear dialog target
             Player player = GetOwnerOfType<Player>();
-            player?.SetDialogTarget(InvalidId, InvalidId);
+            player?.SetDialogTargetId(InvalidId, InvalidId);
 
-            DeactivateTeamUpAgent();
+            // despawn teamups / controlled entities
+            DespawnPersistentAgents();
 
-            Inventory summonedInventory = GetInventory(InventoryConvenienceLabel.Summoned);
-            summonedInventory?.DestroyContained();
+            CancelEnduranceEvents();
 
             if (player != null) player.Properties[PropertyEnum.AvatarTotalTimePlayed] = player.TimePlayed();
             Properties[PropertyEnum.AvatarTotalTimePlayed] = TimePlayed();
             Properties[PropertyEnum.AvatarTimePlayedStart] = TimeSpan.Zero;
 
+            // Pause boosts while not in the world
+            UpdateBoostConditionPauseState(true);
+
             // Store missions to Avatar
             player?.MissionManager?.StoreAvatarMissions(this);
+
+            // Cancel events
+            EventScheduler scheduler = Game.GameEventScheduler;
+            scheduler.CancelEvent(_refreshStatsPowerEvent);
+
+            // summoner condition
+            foreach (var summon in new SummonedEntityIterator(this))
+                summon.RemoveSummonerCondition(Id);
         }
 
         public TimeSpan TimePlayed()
@@ -2144,6 +3725,11 @@ namespace MHServerEmu.Games.Entities.Avatars
         }
 
         #endregion
+
+        public override string ToString()
+        {
+            return $"{base.ToString()}, Player={_playerName?.Get()} (0x{_ownerPlayerDbId:X})";
+        }
 
         protected override void BuildString(StringBuilder sb)
         {
@@ -2197,9 +3783,29 @@ namespace MHServerEmu.Games.Entities.Avatars
             protected override CallbackDelegate GetCallback() => (t) => ((Avatar)t).AvatarEnteredRegion();
         }
 
+        private class RefreshStatsPowersEvent : CallMethodEvent<Entity>
+        {
+            protected override CallbackDelegate GetCallback() => (t) => ((Avatar)t).RefreshStatsPower();
+        }
+
         private class RecheckContinuousPowerEvent : CallMethodEvent<Entity>
         {
             protected override CallbackDelegate GetCallback() => (t) => ((Avatar)t).CheckContinuousPower();
+        }
+
+        private class DismissTeamUpAgentEvent : CallMethodEvent<Entity>
+        {
+            protected override CallbackDelegate GetCallback() => (t) => ((Avatar)t).DismissTeamUpAgent(true);
+        }
+
+        private class DespawnControlledEvent : CallMethodEvent<Entity>
+        {
+            protected override CallbackDelegate GetCallback() => (t) => ((Avatar)t).DespawnControlledAgent();
+        }
+
+        private class DelayedPowerActivationEvent : CallMethodEvent<Entity>
+        {
+            protected override CallbackDelegate GetCallback() => (t) => ((Avatar)t).DelayedPowerActivation();
         }
 
         private class ActivateSwapInPowerEvent : TargetedScheduledEvent<Entity>
@@ -2219,6 +3825,16 @@ namespace MHServerEmu.Games.Entities.Avatars
 
                 return avatar.ActivatePower(swapInPowerRef, ref settings) == PowerUseResult.Success;
             }
+        }
+
+        private class EnableEnduranceRegenEvent : CallMethodEventParam1<Entity, ManaType>
+        {
+            protected override CallbackDelegate GetCallback() => (t, p1) => ((Avatar)t).EnableEnduranceRegen(p1);
+        }
+
+        private class UpdateEnduranceEvent : CallMethodEventParam1<Entity, ManaType>
+        {
+            protected override CallbackDelegate GetCallback() => (t, p1) => ((Avatar)t).UpdateEndurance(p1);
         }
 
         #endregion

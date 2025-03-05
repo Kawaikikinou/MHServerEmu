@@ -1,5 +1,6 @@
 ﻿using Gazillion;
 using Google.ProtocolBuffers;
+using MHServerEmu.Core.Config;
 using MHServerEmu.Core.Extensions;
 using MHServerEmu.Core.Logging;
 using MHServerEmu.Core.Memory;
@@ -20,6 +21,7 @@ using MHServerEmu.Games.Events;
 using MHServerEmu.Games.GameData;
 using MHServerEmu.Games.GameData.Prototypes;
 using MHServerEmu.Games.MetaGames;
+using MHServerEmu.Games.MTXStore;
 using MHServerEmu.Games.Powers;
 using MHServerEmu.Games.Properties;
 using MHServerEmu.Games.Regions;
@@ -57,6 +59,7 @@ namespace MHServerEmu.Games.Network
         public Player Player { get; private set; }
 
         public ulong PlayerDbId { get => (ulong)_dbAccount.Id; }
+        public long GazillioniteBalance { get => _dbAccount.Player.GazillioniteBalance; set => _dbAccount.Player.GazillioniteBalance = value; }
 
         /// <summary>
         /// Constructs a new <see cref="PlayerConnection"/>.
@@ -131,6 +134,14 @@ namespace MHServerEmu.Games.Network
 
             // Initialize AOI
             AOI.AOIVolume = _dbAccount.Player.AOIVolume;
+
+            // Set G balance for new accounts if needed
+            if (_dbAccount.Player.GazillioniteBalance == -1)
+            {
+                long defaultBalance = ConfigManager.Instance.GetConfig<BillingConfig>().GazillioniteBalanceForNewAccounts;
+                Logger.Trace($"LoadFromDBAccount(): Setting Gazillionite balance for account [{_dbAccount}] to the default value for new accounts ({defaultBalance})", LogCategory.MTXStore);
+                _dbAccount.Player.GazillioniteBalance = defaultBalance;
+            }
 
             // Create player entity
             using (EntitySettings playerSettings = ObjectPoolManager.Instance.Get<EntitySettings>())
@@ -444,6 +455,8 @@ namespace MHServerEmu.Games.Network
 
             switch ((ClientToGameServerMessage)message.Id)
             {
+                case ClientToGameServerMessage.NetMessagePlayerSystemMetrics:               OnPlayerSystemMetrics(message); break;              // 1
+                case ClientToGameServerMessage.NetMessagePlayerSteamInfo:                   OnPlayerSteamInfo(message); break;                  // 2
                 case ClientToGameServerMessage.NetMessageIsRegionAvailable:                 OnIsRegionAvailable(message); break;                // 5
                 case ClientToGameServerMessage.NetMessageUpdateAvatarState:                 OnUpdateAvatarState(message); break;                // 6
                 case ClientToGameServerMessage.NetMessageCellLoaded:                        OnCellLoaded(message); break;                       // 7
@@ -466,9 +479,11 @@ namespace MHServerEmu.Games.Network
                 case ClientToGameServerMessage.NetMessageAbilitySlotToAbilityBar:           OnAbilitySlotToAbilityBar(message); break;          // 46
                 case ClientToGameServerMessage.NetMessageAbilityUnslotFromAbilityBar:       OnAbilityUnslotFromAbilityBar(message); break;      // 47
                 case ClientToGameServerMessage.NetMessageAbilitySwapInAbilityBar:           OnAbilitySwapInAbilityBar(message); break;          // 48
+                case ClientToGameServerMessage.NetMessagePowerRecentlyUnlocked:             OnPowerRecentlyUnlocked(message); break;            // 51
                 case ClientToGameServerMessage.NetMessageRequestDeathRelease:               OnRequestDeathRelease(message); break;              // 52
                 case ClientToGameServerMessage.NetMessageReturnToHub:                       OnReturnToHub(message); break;                      // 55
                 case ClientToGameServerMessage.NetMessageRequestMissionRewards:             OnRequestMissionRewards(message); break;            // 57
+                case ClientToGameServerMessage.NetMessageRequestRemoveAndKillControlledAgent:   OnRequestRemoveAndKillControlledAgent(message); break;   // 58
                 case ClientToGameServerMessage.NetMessageMetaGameUpdateNotification:        OnMetaGameUpdateNotification(message); break;       // 63
                 case ClientToGameServerMessage.NetMessageNotifyFullscreenMovieStarted:      OnNotifyFullscreenMovieStarted(message); break;     // 84
                 case ClientToGameServerMessage.NetMessageNotifyFullscreenMovieFinished:     OnNotifyFullscreenMovieFinished(message); break;    // 85
@@ -481,6 +496,8 @@ namespace MHServerEmu.Games.Network
                 case ClientToGameServerMessage.NetMessageVendorRequestSellItemTo:           OnVendorRequestSellItemTo(message); break;          // 103
                 case ClientToGameServerMessage.NetMessageVendorRequestDonateItemTo:         OnVendorRequestDonateItemTo(message); break;        // 104
                 case ClientToGameServerMessage.NetMessageVendorRequestRefresh:              OnVendorRequestRefresh(message); break;             // 105
+                case ClientToGameServerMessage.NetMessagePullCommunityStatus:               OnPullCommunityStatus(message); break;              // 107
+                case ClientToGameServerMessage.NetMessageAkEvent:                           OnAkEvent(message); break;                          // 109
                 case ClientToGameServerMessage.NetMessageSetTipSeen:                        OnSetTipSeen(message); break;                       // 110
                 case ClientToGameServerMessage.NetMessageHUDTutorialDismissed:              OnHUDTutorialDismissed(message); break;             // 111
                 case ClientToGameServerMessage.NetMessageTryMoveInventoryContentsToGeneral: OnTryMoveInventoryContentsToGeneral(message); break;// 112
@@ -492,7 +509,11 @@ namespace MHServerEmu.Games.Network
                 case ClientToGameServerMessage.NetMessageRequestInterestInTeamUpEquipment:  OnRequestInterestInTeamUpEquipment(message); break; // 124
                 case ClientToGameServerMessage.NetMessageTryTeamUpSelect:                   OnTryTeamUpSelect(message); break;                  // 125
                 case ClientToGameServerMessage.NetMessageRequestTeamUpDismiss:              OnRequestTeamUpDismiss(message); break;             // 126
+                case ClientToGameServerMessage.NetMessageTryTeamUpStyleSelect:              OnTryTeamUpStyleSelect(message); break;             // 127
+                case ClientToGameServerMessage.NetMessageInfinityPointAllocationCommit:     OnInfinityPointAllocationCommit(message); break;    // 129
+                case ClientToGameServerMessage.NetMessageRespecInfinity:                    OnRespecInfinity(message); break;                   // 130
                 case ClientToGameServerMessage.NetMessageOmegaBonusAllocationCommit:        OnOmegaBonusAllocationCommit(message); break;       // 132
+                case ClientToGameServerMessage.NetMessageRespecOmegaBonus:                  OnRespecOmegaBonus(message); break;                 // 133
                 case ClientToGameServerMessage.NetMessageNewItemGlintPlayed:                OnNewItemGlintPlayed(message); break;               // 135
                 case ClientToGameServerMessage.NetMessageNewItemHighlightCleared:           OnNewItemHighlightCleared(message); break;          // 136
                 case ClientToGameServerMessage.NetMessageAssignStolenPower:                 OnAssignStolenPower(message); break;                // 139
@@ -513,6 +534,7 @@ namespace MHServerEmu.Games.Network
                 case ClientToGameServerMessage.NetMessageTell:                                                                                  // 65
                 case ClientToGameServerMessage.NetMessageReportPlayer:                                                                          // 66
                 case ClientToGameServerMessage.NetMessageChatBanVote:                                                                           // 67
+                case ClientToGameServerMessage.NetMessageTryModifyCommunityMemberCircle:                                                        // 106, TODO: handle this in game
                     ServerManager.Instance.RouteMessage(_frontendClient, message, ServerType.GroupingManager);
                     break;
 
@@ -535,6 +557,31 @@ namespace MHServerEmu.Games.Network
 
                 default: Logger.Warn($"ReceiveMessage(): Unhandled {(ClientToGameServerMessage)message.Id} [{message.Id}]"); break;
             }
+        }
+
+        private bool OnPlayerSystemMetrics(MailboxMessage message)  // 1
+        {
+            var playerSystemMetrics = message.As<NetMessagePlayerSystemMetrics>();
+            if (playerSystemMetrics == null) return Logger.WarnReturn(false, $"OnPlayerSystemMetrics(): Failed to retrieve message");
+
+            // Adding this handler to reduce log spam.
+            // This message is sent when the client logs in for the first time after startup. We are not interested in any of this info.
+
+            return true;
+        }
+
+        private bool OnPlayerSteamInfo(MailboxMessage message)  // 2
+        {
+            var playerSteamInfo = message.As<NetMessagePlayerSteamInfo>();
+            if (playerSteamInfo == null) return Logger.WarnReturn(false, $"OnPlayerSteamInfo(): Failed to retrieve message");
+
+            // Adding this handler to reduce log spam.
+            // TODO: Figure out if we can make use of any Steam functionality. If so, set PropertyEnum.SteamUserId and PropertyEnum.SteamAchievementUpdateSeqNum here.
+
+            // NOTE: It's impossible to use this to grant Steam achievements without a publisher API key.
+            // See SetUserStatsForGame in Steamworks docs for more info: https://partner.steamgames.com/doc/webapi/isteamuserstats
+
+            return true;
         }
 
         private bool OnIsRegionAvailable(MailboxMessage message)    // 5
@@ -566,7 +613,8 @@ namespace MHServerEmu.Games.Network
             if (updateAvatarState == null) return Logger.WarnReturn(false, $"OnUpdateAvatarState(): Failed to retrieve message");
 
             Avatar avatar = Player.CurrentAvatar;
-            if (avatar == null || avatar.IsInWorld == false) return false;
+            if (avatar == null || avatar.IsAliveInWorld == false)
+                return false;
 
             // Transfer data from the archive
             // NOTE: We need to be extra careful here because this is the only archive that is serialized by the client,
@@ -581,7 +629,8 @@ namespace MHServerEmu.Games.Network
             if (Serializer.Transfer(archive, ref avatarEntityId) == false)
                 return Logger.WarnReturn(false, "OnUpdateAvatarState(): Failed to transfer avatarEntityId");
 
-            if (avatarEntityId != avatar.Id) return false;
+            if (avatarEntityId != avatar.Id)
+                return false;
 
             bool isUsingGamepadInput = false;
             if (Serializer.Transfer(archive, ref isUsingGamepadInput) == false)
@@ -618,19 +667,31 @@ namespace MHServerEmu.Games.Network
                 orientation = syncOrientation;
 
                 // Update position without sending it to clients (local avatar is moved by its own client, other avatars are moved by locomotion)
-                avatar.ChangeRegionPosition(canMove ? position : null, canRotate ? orientation : null, ChangePositionFlags.DoNotSendToClients);
+                if (avatar.ChangeRegionPosition(canMove ? position : null, canRotate ? orientation : null, ChangePositionFlags.DoNotSendToClients) == ChangePositionResult.PositionChanged)
+                {
+                    // Clear pending action if successfully updated position
+                    if (avatar.IsInPendingActionState(PendingActionState.MovingToRange) == false &&
+                        avatar.IsInPendingActionState(PendingActionState.WaitingForPrevPower) == false &&
+                        avatar.IsInPendingActionState(PendingActionState.FindingLandingSpot) == false)
+                    {
+                        avatar.CancelPendingAction();
+                    }
+                }
+
                 avatar.UpdateNavigationInfluence();
             }
 
             if (fieldFlags.HasFlag(LocomotionMessageFlags.NoLocomotionState) == false && avatar.Locomotor != null)
             {
                 // Make a copy of the last sync state and update it with new data
-                LocomotionState newSyncState = new(avatar.Locomotor.LastSyncState);
+                using LocomotionState newSyncState = ObjectPoolManager.Instance.Get<LocomotionState>();
+                newSyncState.Set(avatar.Locomotor.LastSyncState);
 
                 // NOTE: Deserialize in a try block because we don't trust this
                 try
                 {
-                    LocomotionState.SerializeFrom(archive, newSyncState, fieldFlags);
+                    if (LocomotionState.SerializeFrom(archive, newSyncState, fieldFlags) == false)
+                        return Logger.WarnReturn(false, "OnUpdateAvatarState(): Failed to transfer newSyncState");
                 }
                 catch (Exception e)
                 {
@@ -691,18 +752,6 @@ namespace MHServerEmu.Games.Network
             settings.ApplyProtobuf(tryActivatePower);
 
             avatar.ActivatePower(powerProtoRef, ref settings);
-
-            // HACK: Destroy the bowling ball item (remove this when we implement consumable items)
-            if (powerProtoRef == (PrototypeId)18211158277448213692)
-            {
-                Inventory inventory = Player.GetInventory(InventoryConvenienceLabel.General);
-
-                // BowlingBallItem
-                if (inventory.GetMatchingEntity((PrototypeId)7835010736274089329) is not Item bowlingBall)
-                    return false;
-
-                bowlingBall.DecrementStack();
-            }
 
             return true;
         }
@@ -782,9 +831,9 @@ namespace MHServerEmu.Games.Network
             PrototypeId powerProtoRef = (PrototypeId)continuousPowerUpdate.PowerPrototypeId;
             ulong targetId = continuousPowerUpdate.HasIdTargetEntity ? continuousPowerUpdate.IdTargetEntity : 0;
             Vector3 targetPosition = continuousPowerUpdate.HasTargetPosition ? new(continuousPowerUpdate.TargetPosition) : Vector3.Zero;
-            uint randomSeed = continuousPowerUpdate.HasRandomSeed ? continuousPowerUpdate.RandomSeed : 0;
+            int randomSeed = continuousPowerUpdate.HasRandomSeed ? (int)continuousPowerUpdate.RandomSeed : 0;
 
-            avatar.SetContinuousPower(powerProtoRef, targetId, targetPosition, randomSeed);
+            avatar.SetContinuousPower(powerProtoRef, targetId, targetPosition, randomSeed, false);
             return true;
         }
 
@@ -823,6 +872,7 @@ namespace MHServerEmu.Games.Network
             // Try to pick up the item as currency
             if (Player.AcquireCurrencyItem(item))
             {
+                Player.CurrentAvatar?.TryActivateOnLootPickupProcs(item);
                 item.Destroy();
                 return true;
             }
@@ -865,6 +915,8 @@ namespace MHServerEmu.Games.Network
 
             // Remove instanced loot restriction
             item.Properties.RemoveProperty(PropertyEnum.RestrictedToPlayerGuid);
+
+            Player.CurrentAvatar?.TryActivateOnLootPickupProcs(item);
 
             return true;
         }
@@ -1009,7 +1061,6 @@ namespace MHServerEmu.Games.Network
             var abilityKeyMapping = Player.CurrentAvatar.CurrentAbilityKeyMapping;
             PrototypeId prototypeRefId = (PrototypeId)slotToAbilityBar.PrototypeRefId;
             AbilitySlot slotNumber = (AbilitySlot)slotToAbilityBar.SlotNumber;
-            Logger.Trace($"NetMessageAbilitySlotToAbilityBar: {GameDatabase.GetFormattedPrototypeName(prototypeRefId)} to {slotNumber}");
 
             // Set
             abilityKeyMapping.SetAbilityInAbilitySlot(prototypeRefId, slotNumber);
@@ -1023,7 +1074,6 @@ namespace MHServerEmu.Games.Network
 
             var abilityKeyMapping = Player.CurrentAvatar.CurrentAbilityKeyMapping;
             AbilitySlot slotNumber = (AbilitySlot)unslotFromAbilityBar.SlotNumber;
-            Logger.Trace($"NetMessageAbilityUnslotFromAbilityBar: from {slotNumber}");
 
             // Remove by assigning invalid id
             abilityKeyMapping.SetAbilityInAbilitySlot(PrototypeId.Invalid, slotNumber);
@@ -1047,7 +1097,25 @@ namespace MHServerEmu.Games.Network
             return true;
         }
 
-        private bool OnRequestDeathRelease(MailboxMessage message)  // 48
+        private bool OnPowerRecentlyUnlocked(MailboxMessage message)  // 51
+        {
+            var powerRecentlyUnlocked = message.As<NetMessagePowerRecentlyUnlocked>();
+            if (powerRecentlyUnlocked == null) return Logger.WarnReturn(false, $"OnPowerRecentlyUnlocked(): Failed to retrieve message");
+
+            // PowerUnlocked is a client-authoritative property, this message is used to keep the server in sync.
+            // It is also flagged as ReplicateForTransfer, so it's supposed to persist until the client logs out.
+            Avatar avatar = Game.EntityManager.GetEntity<Avatar>(powerRecentlyUnlocked.AvatarEntityId);
+            if (avatar == null) return Logger.WarnReturn(false, "OnPowerRecentlyUnlocked(): avatar == null");
+
+            // Get the power prototype instance to validate that this is a real power prototype
+            PowerPrototype powerProto = ((PrototypeId)powerRecentlyUnlocked.PowerPrototypeId).As<PowerPrototype>();
+            if (powerProto == null) return Logger.WarnReturn(false, "OnPowerRecentlyUnlocked(): powerProto == null");
+
+            avatar.Properties[PropertyEnum.PowerUnlocked, powerProto.DataRef] = powerRecentlyUnlocked.IsRecentlyUnlocked;
+            return true;
+        }
+
+        private bool OnRequestDeathRelease(MailboxMessage message)  // 52
         {
             var requestDeathRelease = message.As<NetMessageRequestDeathRelease>();
             if (requestDeathRelease == null) return Logger.WarnReturn(false, $"OnRequestDeathRelease(): Failed to retrieve message");
@@ -1112,6 +1180,18 @@ namespace MHServerEmu.Games.Network
             return true;
         }
 
+        private bool OnRequestRemoveAndKillControlledAgent(MailboxMessage message) // 58
+        {
+            var request = message.As<NetMessageRequestRemoveAndKillControlledAgent>();
+            if (request == null) return Logger.WarnReturn(false, $"OnRequestRemoveAndKillControlledAgent(): Failed to retrieve message");
+
+            var avatar = Game.EntityManager.GetEntity<Avatar>(request.AvatarId);
+            if (avatar == null || avatar.GetOwnerOfType<Player>() != Player) return false;
+
+            avatar.RemoveAndKillControlledAgent();
+            return true;
+        }
+
         private bool OnMetaGameUpdateNotification(MailboxMessage message)
         {
             var metaGameUpdate = message.As<NetMessageMetaGameUpdateNotification>();
@@ -1152,6 +1232,7 @@ namespace MHServerEmu.Games.Network
 
         private bool OnGracefulDisconnect(MailboxMessage message)   // 98
         {
+            Logger.Trace($"OnGracefulDisconnect(): Player=[{Player}]");
             SendMessage(NetMessageGracefulDisconnectAck.DefaultInstance);
             return true;
         }
@@ -1160,7 +1241,7 @@ namespace MHServerEmu.Games.Network
         {
             var setDialogTarget = message.As<NetMessageSetDialogTarget>();
             if (setDialogTarget == null) return Logger.WarnReturn(false, $"OnSetDialogTarget(): Failed to retrieve message");
-            Player.SetDialogTarget(setDialogTarget.TargetId, setDialogTarget.InteractorId);
+            Player.SetDialogTargetId(setDialogTarget.TargetId, setDialogTarget.InteractorId);
             return true;
         }
 
@@ -1217,6 +1298,47 @@ namespace MHServerEmu.Games.Network
             if (vendorRequestRefresh == null) return Logger.WarnReturn(false, $"OnVendorRequestRefresh(): Failed to retrieve message");
 
             Player?.RefreshVendorInventory(vendorRequestRefresh.VendorId);
+            return true;
+        }
+
+        private bool OnPullCommunityStatus(MailboxMessage message)  // 107
+        {
+            var pullCommunityStatus = message.As<NetMessagePullCommunityStatus>();
+            if (pullCommunityStatus == null) return Logger.WarnReturn(false, $"OnPullCommunityStatus(): Failed to retrieve message");
+
+            Player?.Community?.PullCommunityStatus();
+            return true;
+        }
+
+        private bool OnAkEvent(MailboxMessage message) // 109
+        {
+            var akEvent = message.As<NetMessageAkEvent>();
+            if (akEvent == null) return Logger.WarnReturn(false, $"OnAkEvent(): Failed to retrieve message");
+
+            // AkEvent is a Wwise audio event, Ak stands for Audiokinetic. One thing these are used for is audio emotes.
+
+            Avatar avatar = Player?.CurrentAvatar;
+            if (avatar == null)
+                return false;
+
+            // Replicate this AkEvent to nearby players
+            PlayerConnectionManager networkManager = Game.NetworkManager;
+            List<PlayerConnection> interestedClientList = ListPool<PlayerConnection>.Instance.Get();
+            if (networkManager.GetInterestedClients(interestedClientList, avatar, AOINetworkPolicyValues.AOIChannelProximity, true))
+            {
+                var builder = NetMessageRecvAkEventFromEntity.CreateBuilder()
+                    .SetAkEventId(akEvent.AkEventId)
+                    .SetIsVO(akEvent.IsVO)
+                    .SetEntityId(avatar.Id)
+                    .SetEventType(akEvent.EventType);
+
+                if (akEvent.HasCooldownMS)
+                    builder.SetCooldownMS(akEvent.CooldownMS);
+
+                networkManager.SendMessageToMultiple(interestedClientList, builder.Build());
+            }
+
+            ListPool<PlayerConnection>.Instance.Return(interestedClientList);
             return true;
         }
 
@@ -1407,7 +1529,54 @@ namespace MHServerEmu.Games.Network
         private void OnRequestTeamUpDismiss(MailboxMessage message) // 126
         {
             Avatar avatar = Player.CurrentAvatar;
-            avatar.DismissTeamUpAgent();
+            avatar.DismissTeamUpAgent(true);
+        }
+
+        private void OnTryTeamUpStyleSelect(MailboxMessage message) // 127
+        {
+            var styleSelect = message.As<NetMessageTryTeamUpStyleSelect>();
+            Avatar avatar = Player.CurrentAvatar;
+            avatar.TryTeamUpStyleSelect(styleSelect.StyleIndex);
+        }
+
+        private bool OnInfinityPointAllocationCommit(MailboxMessage message)   // 132
+        {
+            var infinityBonusAllocationCommit = message.As<NetMessageInfinityPointAllocationCommit>();
+            if (infinityBonusAllocationCommit == null) return Logger.WarnReturn(false, $"OnInfinityPointAllocationCommit(): Failed to retrieve message");
+
+            Avatar avatar = Game.EntityManager.GetEntity<Avatar>(infinityBonusAllocationCommit.AvatarId);
+            if (avatar == null) return Logger.WarnReturn(false, "OnInfinityPointAllocationCommit(): avatar == null");
+
+            if (avatar.GetOwnerOfType<Player>() != Player)
+                return Logger.WarnReturn(false, $"OnInfinityPointAllocationCommit(): Player [{Player}] is attempting to allocate Infinity points for avatar [{avatar}] that belongs to another player");
+
+            if (avatar.IsInfinitySystemUnlocked() == false)
+                return Logger.WarnReturn(false, $"OnInfinityPointAllocationCommit(): Player [{Player}] is attempting to allocate Infinity points for avatar [{avatar}] that does not have the Infinity system unlocked");
+
+            avatar.InfinityPointAllocationCommit(infinityBonusAllocationCommit);
+            return true;
+        }
+
+        private bool OnRespecInfinity(MailboxMessage message)
+        {
+            var respecInfinity = message.As<NetMessageRespecInfinity>();
+            if (respecInfinity == null) return Logger.WarnReturn(false, $"OnRespecInfinity(): Failed to retrieve message");
+
+            Avatar avatar = Game.EntityManager.GetEntity<Avatar>(respecInfinity.AvatarId);
+            if (avatar == null) return Logger.WarnReturn(false, "OnRespecInfinity(): avatar == null");
+
+            if (avatar.GetOwnerOfType<Player>() != Player)
+                return Logger.WarnReturn(false, $"OnRespecInfinity(): Player [{Player}] is attempting to respec Infinity for avatar [{avatar}] that belongs to another player");
+
+            if (avatar.IsInfinitySystemUnlocked() == false)
+                return Logger.WarnReturn(false, $"OnRespecInfinity(): Player [{Player}] is attempting to respec Infinity for avatar [{avatar}] that does not have the Infinity system unlocked");
+
+            InfinityGem infinityGem = (InfinityGem)respecInfinity.Gem;
+            if (infinityGem != InfinityGem.None && (infinityGem < 0 || infinityGem >= InfinityGem.NumGems))
+                return Logger.WarnReturn(false, $"OnRespecInfinity(): Received invalid InfinityGem {infinityGem}");
+
+            avatar.RespecInfinity(infinityGem);
+            return true;
         }
 
         private bool OnOmegaBonusAllocationCommit(MailboxMessage message)   // 132
@@ -1415,7 +1584,34 @@ namespace MHServerEmu.Games.Network
             var omegaBonusAllocationCommit = message.As<NetMessageOmegaBonusAllocationCommit>();
             if (omegaBonusAllocationCommit == null) return Logger.WarnReturn(false, $"OnOmegaBonusAllocationCommit(): Failed to retrieve message");
 
-            Logger.Debug(omegaBonusAllocationCommit.ToString());
+            Avatar avatar = Game.EntityManager.GetEntity<Avatar>(omegaBonusAllocationCommit.AvatarId);
+            if (avatar == null) return Logger.WarnReturn(false, "OnOmegaBonusAllocationCommit(): avatar == null");
+
+            if (avatar.GetOwnerOfType<Player>() != Player)
+                return Logger.WarnReturn(false, $"OnOmegaBonusAllocationCommit(): Player [{Player}] is attempting to allocate Omega points for avatar [{avatar}] that belongs to another player");
+
+            if (avatar.IsOmegaSystemUnlocked() == false)
+                return Logger.WarnReturn(false, $"OnOmegaBonusAllocationCommit(): Player [{Player}] is attempting to allocate Omega points for avatar [{avatar}] that does not have the Omega system unlocked");
+
+            avatar.OmegaPointAllocationCommit(omegaBonusAllocationCommit);
+            return true;
+        }
+
+        private bool OnRespecOmegaBonus(MailboxMessage message)
+        {
+            var respecOmegaBonus = message.As<NetMessageRespecOmegaBonus>();
+            if (respecOmegaBonus == null) return Logger.WarnReturn(false, $"OnRespecOmegaBonus(): Failed to retrieve message");
+
+            Avatar avatar = Game.EntityManager.GetEntity<Avatar>(respecOmegaBonus.AvatarId);
+            if (avatar == null) return Logger.WarnReturn(false, "OnRespecOmegaBonus(): avatar == null");
+
+            if (avatar.GetOwnerOfType<Player>() != Player)
+                return Logger.WarnReturn(false, $"OnRespecOmegaBonus(): Player [{Player}] is attempting to respec Omega bonus for avatar [{avatar}] that belongs to another player");
+
+            if (avatar.IsOmegaSystemUnlocked() == false)
+                return Logger.WarnReturn(false, $"OnRespecOmegaBonus(): Player [{Player}] is attempting to respec Omega bonus for avatar [{avatar}] that does not have the Omega system unlocked");
+
+            avatar.RespecOmegaBonus();
             return true;
         }
 

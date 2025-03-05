@@ -3,6 +3,7 @@ using Gazillion;
 using Google.ProtocolBuffers;
 using MHServerEmu.Core.Collisions;
 using MHServerEmu.Core.Extensions;
+using MHServerEmu.Core.Helpers;
 using MHServerEmu.Core.Logging;
 using MHServerEmu.Core.Memory;
 using MHServerEmu.Core.Serialization;
@@ -22,6 +23,7 @@ using MHServerEmu.Games.GameData;
 using MHServerEmu.Games.GameData.Calligraphy;
 using MHServerEmu.Games.GameData.LiveTuning;
 using MHServerEmu.Games.GameData.Prototypes;
+using MHServerEmu.Games.GameData.Tables;
 using MHServerEmu.Games.Loot;
 using MHServerEmu.Games.Missions;
 using MHServerEmu.Games.Navi;
@@ -127,6 +129,8 @@ namespace MHServerEmu.Games.Entities
         public bool IsOnLoadingScreen { get; private set; }
         public bool IsFullscreenObscured { get => IsFullscreenMoviePlaying || IsOnLoadingScreen; }
 
+        public bool IsSwitchingAvatar { get; private set; }
+
         // Network
         public PlayerConnection PlayerConnection { get; private set; }
         public AreaOfInterest AOI { get => PlayerConnection.AOI; }
@@ -150,6 +154,9 @@ namespace MHServerEmu.Games.Entities
         public ulong DialogTargetId { get; private set; }
         public ulong DialogInteractorId { get; private set; }
         public PrototypeId CurrentOpenStashPagePrototypeRef { get; set; }
+        public long InfinityXP { get => Properties[PropertyEnum.InfinityXP]; }
+        public long OmegaXP { get => Properties[PropertyEnum.OmegaXP]; }
+        public long GazillioniteBalance { get => PlayerConnection.GazillioniteBalance; set => PlayerConnection.GazillioniteBalance = value; }
 
         public Player(Game game) : base(game)
         {
@@ -196,62 +203,8 @@ namespace MHServerEmu.Games.Entities
             _emailVerified = true;
             _accountCreationTimestamp = Clock.DateTimeToUnixTime(new(2023, 07, 16, 1, 48, 0));   // First GitHub commit date
 
-            #region Hardcoded social tab easter eggs
-            _community.AddMember(1, "DavidBrevik", CircleId.__Friends);
-            _community.ReceiveMemberBroadcast(CommunityMemberBroadcast.CreateBuilder().SetMemberPlayerDbId(1).SetIsOnline(1)
-                .SetCurrentRegionRefId(12735255224807267622).SetCurrentDifficultyRefId(18016845980090109785)
-                .AddSlots(CommunityMemberAvatarSlot.CreateBuilder().SetAvatarRefId(15769648016960461069).SetCostumeRefId(4881398219179434365).SetLevel(60).SetPrestigeLevel(6))
-                .Build());
-
-            _community.AddMember(2, "TonyStark", CircleId.__Friends);
-            _community.ReceiveMemberBroadcast(CommunityMemberBroadcast.CreateBuilder().SetMemberPlayerDbId(2).SetIsOnline(1)
-                .SetCurrentRegionRefId((ulong)RegionPrototypeId.NPEAvengersTowerHUBRegion).SetCurrentDifficultyRefId(18016845980090109785)
-                .AddSlots(CommunityMemberAvatarSlot.CreateBuilder().SetAvatarRefId(421791326977791218).SetCostumeRefId(7150542631074405762).SetLevel(60).SetPrestigeLevel(5))
-                .Build());
-
-            _community.AddMember(3, "Doomsaw", CircleId.__Friends);
-            _community.ReceiveMemberBroadcast(CommunityMemberBroadcast.CreateBuilder().SetMemberPlayerDbId(3).SetIsOnline(1)
-                .AddSlots(CommunityMemberAvatarSlot.CreateBuilder().SetAvatarRefId(17750839636937086083).SetCostumeRefId(14098108758769669917).SetLevel(60).SetPrestigeLevel(6))
-                .Build());
-
-            _community.AddMember(4, "PizzaTime", CircleId.__Friends);
-            _community.ReceiveMemberBroadcast(CommunityMemberBroadcast.CreateBuilder().SetMemberPlayerDbId(4).SetIsOnline(1)
-                .AddSlots(CommunityMemberAvatarSlot.CreateBuilder().SetAvatarRefId(9378552423541970369).SetCostumeRefId(6454902525769881598).SetLevel(60).SetPrestigeLevel(5))
-                .Build());
-
-            _community.AddMember(5, "RogueServerEnjoyer", CircleId.__Friends);
-            _community.ReceiveMemberBroadcast(CommunityMemberBroadcast.CreateBuilder().SetMemberPlayerDbId(5).SetIsOnline(1)
-                .AddSlots(CommunityMemberAvatarSlot.CreateBuilder().SetAvatarRefId(1660250039076459846).SetCostumeRefId(9447440487974639491).SetLevel(60).SetPrestigeLevel(3))
-                .Build());
-
-            _community.AddMember(6, "WhiteQueenXOXO", CircleId.__Friends);
-            _community.ReceiveMemberBroadcast(CommunityMemberBroadcast.CreateBuilder().SetMemberPlayerDbId(6).SetIsOnline(1)
-                .AddSlots(CommunityMemberAvatarSlot.CreateBuilder().SetAvatarRefId(412966192105395660).SetCostumeRefId(12724924652099869123).SetLevel(60).SetPrestigeLevel(4))
-                .Build());
-
-            _community.AddMember(7, "AlexBond", CircleId.__Friends);
-            _community.ReceiveMemberBroadcast(CommunityMemberBroadcast.CreateBuilder().SetMemberPlayerDbId(7).SetIsOnline(1)
-                .AddSlots(CommunityMemberAvatarSlot.CreateBuilder().SetAvatarRefId(9255468350667101753).SetCostumeRefId(16813567318560086134).SetLevel(60).SetPrestigeLevel(2))
-                .Build());
-
-            _community.AddMember(8, "Crypto137", CircleId.__Friends);
-            _community.ReceiveMemberBroadcast(CommunityMemberBroadcast.CreateBuilder().SetMemberPlayerDbId(8).SetIsOnline(1)
-                .AddSlots(CommunityMemberAvatarSlot.CreateBuilder().SetAvatarRefId(421791326977791218).SetCostumeRefId(1195778722002966150).SetLevel(60).SetPrestigeLevel(2))
-                .Build());
-
-            _community.AddMember(9, "yn01", CircleId.__Friends);
-            _community.ReceiveMemberBroadcast(CommunityMemberBroadcast.CreateBuilder().SetMemberPlayerDbId(9).SetIsOnline(1)
-                .AddSlots(CommunityMemberAvatarSlot.CreateBuilder().SetAvatarRefId(12534955053251630387).SetCostumeRefId(14506515434462517197).SetLevel(60).SetPrestigeLevel(2))
-                .Build());
-
-            _community.AddMember(10, "Gazillion", CircleId.__Friends);
-            _community.ReceiveMemberBroadcast(CommunityMemberBroadcast.CreateBuilder().SetMemberPlayerDbId(10).SetIsOnline(0).Build());
-
-            _community.AddMember(11, "FriendlyLawyer", CircleId.__Nearby);
-            _community.ReceiveMemberBroadcast(CommunityMemberBroadcast.CreateBuilder().SetMemberPlayerDbId(11).SetIsOnline(1)
-                .AddSlots(CommunityMemberAvatarSlot.CreateBuilder().SetAvatarRefId(12394659164528645362).SetCostumeRefId(2844257346122946366).SetLevel(99).SetPrestigeLevel(1))
-                .Build());
-            #endregion
+            // Social tab stub
+            _community.AddMember(10, "Coming Soon", CircleId.__Friends);
 
             // Initialize
             OnEnterGameInitStashTabOptions();
@@ -259,6 +212,30 @@ namespace MHServerEmu.Games.Entities
             // TODO: Clean up gameplay options init for new players
             if (settings.ArchiveData.IsNullOrEmpty())
                 _gameplayOptions.ResetToDefaults();
+        }
+
+        public override void OnPropertyChange(PropertyId id, PropertyValue newValue, PropertyValue oldValue, SetPropertyFlags flags)
+        {
+            base.OnPropertyChange(id, newValue, oldValue, flags);
+
+            if (flags.HasFlag(SetPropertyFlags.Refresh)) return;
+
+            switch (id.Enum)
+            {
+                case PropertyEnum.TeamUpsAtMaxLevelPersistent:
+                    var avatar = CurrentAvatar;
+                    if (avatar != null && avatar.IsInWorld)
+                    {
+                        var teamUpAgent = avatar.CurrentTeamUpAgent;
+                        if (teamUpAgent != null)
+                        {
+                            teamUpAgent.SetTeamUpsAtMaxLevel(this);
+                            if (teamUpAgent.IsInWorld) 
+                                teamUpAgent.AddTeamUpSynergyCondition();
+                        }
+                    }
+                    break;
+            }
         }
 
         public void UnlockNewPlayerUISystems()
@@ -930,7 +907,8 @@ namespace MHServerEmu.Games.Entities
             }
 
             // Reapply lifespan
-            TimeSpan expirationTime = item.GetExpirationTime();
+            float expirationTimeMult = Math.Max(Game.CustomGameOptions.TrashedItemExpirationTimeMultiplier, 0f);
+            TimeSpan expirationTime = item.GetExpirationTime() * expirationTimeMult;
             item.ResetLifespan(expirationTime);
 
             return true;
@@ -1055,6 +1033,22 @@ namespace MHServerEmu.Games.Entities
             }
 
             return result;
+        }
+
+        public bool AcquireGazillionite(long amount)
+        {
+            if (amount <= 0) return Logger.WarnReturn(false, "AcquireGazillionite(): amount <= 0");
+
+            long balance = GazillioniteBalance;
+            balance += amount;
+            GazillioniteBalance = balance;
+
+            SendMessage(NetMessageGrantGToPlayerNotification.CreateBuilder()
+                .SetDidSucceed(true)
+                .SetCurrentCurrencyBalance(balance)
+                .Build());
+
+            return true;
         }
 
         protected override bool InitInventories(bool populateInventories)
@@ -1208,7 +1202,6 @@ namespace MHServerEmu.Games.Entities
             }
 
             if (avatarProtoRef == PrototypeId.Invalid) return Logger.WarnReturn(false, "SwitchAvatar(): Failed to find pending avatar switch");
-            Properties.RemovePropertyRange(PropertyEnum.AvatarSwitchPending);
 
             // Get information about the previous avatar
             ulong lastCurrentAvatarId = CurrentAvatar != null ? CurrentAvatar.Id : InvalidId;
@@ -1216,19 +1209,33 @@ namespace MHServerEmu.Games.Entities
             Vector3 prevPosition = CurrentAvatar.RegionLocation.Position;
             Orientation prevOrientation = CurrentAvatar.RegionLocation.Orientation;
 
-            // Do the switch
+            // Find the avatar to switch to
             Inventory avatarLibrary = GetInventory(InventoryConvenienceLabel.AvatarLibrary);
             Inventory avatarInPlay = GetInventory(InventoryConvenienceLabel.AvatarInPlay);
 
             if (avatarLibrary.GetMatchingEntity(avatarProtoRef) is not Avatar avatar)
                 return Logger.WarnReturn(false, $"SwitchAvatar(): Failed to find avatar entity for avatarProtoRef {GameDatabase.GetPrototypeName(avatarProtoRef)}");
 
+            // Remove non-persistent conditions from the current avatar
+            ConditionCollection previousConditions = CurrentAvatar?.ConditionCollection;
+            previousConditions?.RemoveAllConditions(false);
+
+            // Do the switch
             InventoryResult result = avatar.ChangeInventoryLocation(avatarInPlay, 0);
 
             if (result != InventoryResult.Success)
                 return Logger.WarnReturn(false, $"SwitchAvatar(): Failed to change library avatar's inventory location ({result})");
 
+            IsSwitchingAvatar = true;
+
+            // Transfer conditions to the new current avatar
+            ConditionCollection currentConditions = CurrentAvatar?.ConditionCollection;
+            if (previousConditions != null && currentConditions != null)
+                currentConditions.TransferConditionsFrom(previousConditions);
+
             EnableCurrentAvatar(true, lastCurrentAvatarId, prevRegionId, prevPosition, prevOrientation);
+
+            IsSwitchingAvatar = false;
 
             GetRegion()?.PlayerSwitchedToAvatarEvent.Invoke(new(this, avatarProtoRef));
 
@@ -1237,8 +1244,6 @@ namespace MHServerEmu.Games.Entities
 
         public bool EnableCurrentAvatar(bool withSwapInPower, ulong lastCurrentAvatarId, ulong regionId, in Vector3 position, in Orientation orientation)
         {
-            // TODO: Use this for teleportation within region as well
-
             if (CurrentAvatar == null)
                 return Logger.WarnReturn(false, "EnableCurrentAvatar(): CurrentAvatar == null");
 
@@ -1262,6 +1267,10 @@ namespace MHServerEmu.Games.Entities
             // Add new avatar to the world
             if (CurrentAvatar.EnterWorld(region, CurrentAvatar.FloorToCenter(position), orientation, settings) == false)
                 return false;
+
+            // Reset resources AFTER entering world because entering world initializes resources
+            if (withSwapInPower)
+                CurrentAvatar.ResetResources(true);
 
             OnChangeActiveAvatar(0, lastCurrentAvatarId);
             return true;
@@ -1343,6 +1352,142 @@ namespace MHServerEmu.Games.Entities
 
             // NOTE: ServerBonusUnlockLevel is set to 60 in 1.52.
             return playerMaxAvatarLevel >= GameDatabase.GlobalsPrototype.ServerBonusUnlockLevel;
+        }
+
+        #endregion
+
+        #region Alternate Advancement (Omega and Infinity)
+
+        public long GetTotalInfinityPoints()
+        {
+            long infinityPoints = 0;
+
+            for (InfinityGem gem = 0; gem < InfinityGem.NumGems; gem++)
+                infinityPoints += Properties[PropertyEnum.InfinityPoints, (int)gem];
+
+            return infinityPoints;
+        }
+
+        public void AwardInfinityXP(long amount, bool notifyClient)
+        {
+            if (amount <= 0)
+                return;
+
+            long infinityXP = Math.Min(InfinityXP + amount, GameDatabase.AdvancementGlobalsPrototype.InfinityXPCap);
+            Properties[PropertyEnum.InfinityXP] = infinityXP;
+
+            TryInfinityLevelUp(notifyClient);
+        }
+
+        public void TryInfinityLevelUp(bool notifyClient)
+        {
+            long pointsBefore = GetTotalInfinityPoints();
+            long pointsAfter = CalcInfinityPointsFromXP(InfinityXP);
+
+            // Early out if we don't have any points
+            if (pointsAfter <= pointsBefore)
+                return;
+
+            long pointsPerGem = Math.DivRem(pointsAfter - pointsBefore, (int)InfinityGem.NumGems, out long pointsPerGemRemainder);
+
+            InfinityGemBonusTable infinityBonusTable = GameDataTables.Instance.InfinityGemBonusTable;
+
+            NetMessageInfinityPointGain.Builder messageBuilder = notifyClient ? NetMessageInfinityPointGain.CreateBuilder() : null;
+
+            InfinityGem gemStart = (InfinityGem)(int)Properties[PropertyEnum.InfinityGemNext];
+            InfinityGem gemCurrent = gemStart;
+            InfinityGem gemLast = gemStart;
+
+            // Need to use a do loop here instead of for to ensure at least one iteration of it
+            do
+            {
+                long numPointsGained = pointsPerGem;
+
+                // Distribute the remainder
+                if (pointsPerGemRemainder > 0)
+                {
+                    numPointsGained++;
+                    pointsPerGemRemainder--;
+
+                    if (pointsPerGemRemainder == 0)
+                        gemLast = gemCurrent;
+                }
+
+                // Adjust the number of points
+                if (numPointsGained > 0)
+                {
+                    Properties.AdjustProperty((int)numPointsGained, new(PropertyEnum.InfinityPoints, (PropertyParam)gemCurrent));
+                    
+                    messageBuilder?.AddPointsGained(NetStructInfinityPointGain.CreateBuilder()
+                        .SetNumPointsGained(numPointsGained)
+                        .SetInfinityGemEnum((int)gemCurrent));
+                }
+
+                gemCurrent = infinityBonusTable.GetNextGem(gemCurrent);
+            } while (gemCurrent != gemStart);
+
+            Properties[PropertyEnum.InfinityGemNext] = (int)infinityBonusTable.GetNextGem(gemLast);
+
+            Avatar avatar = CurrentAvatar;
+            if (messageBuilder != null && avatar != null && avatar.IsInfinitySystemUnlocked())
+            {
+                messageBuilder.SetAvatarId(avatar.Id);
+                Game.NetworkManager.SendMessageToInterested(messageBuilder.Build(), avatar, AOINetworkPolicyValues.AOIChannelProximity | AOINetworkPolicyValues.AOIChannelOwner);
+            }
+        }
+
+        private static long CalcInfinityPointsFromXP(long xp)
+        {
+            long points = (long)Math.Sqrt(xp / AdvancementGlobalsPrototype.InfinityXPFactor);
+            return Math.Min(points, GameDatabase.AdvancementGlobalsPrototype.InfinityPointsCap);
+        }
+
+        public long GetOmegaPoints()
+        {
+            return Properties[PropertyEnum.OmegaPoints];
+        }
+
+        public void AwardOmegaXP(long amount, bool notifyClient)
+        {
+            if (amount <= 0)
+                return;
+
+            long omegaXP = Math.Min(OmegaXP + amount, GameDatabase.AdvancementGlobalsPrototype.InfinityXPCap);
+            Properties[PropertyEnum.OmegaXP] = omegaXP;
+
+            TryOmegaLevelUp(notifyClient);
+        }
+
+        public void TryOmegaLevelUp(bool notifyClient)
+        {
+            // TODO: Verify if it's working correctly
+
+            long pointsBefore = GetOmegaPoints();
+            long pointsAfter = CalcOmegaPointsFromXP(OmegaXP);
+
+            // Early out if we don't have any points
+            if (pointsAfter <= pointsBefore)
+                return;
+
+            long numPointsGained = pointsAfter - pointsBefore;
+            Properties.AdjustProperty((int)numPointsGained, PropertyEnum.OmegaPoints);
+
+            Avatar avatar = CurrentAvatar;
+            if (notifyClient && avatar != null && avatar.IsOmegaSystemUnlocked())
+            {
+                NetMessageOmegaPointGain message = NetMessageOmegaPointGain.CreateBuilder()
+                    .SetAvatarId(avatar.Id)
+                    .SetNumPointsGained((uint)numPointsGained)
+                    .Build();
+
+                Game.NetworkManager.SendMessageToInterested(message, avatar, AOINetworkPolicyValues.AOIChannelProximity | AOINetworkPolicyValues.AOIChannelOwner);
+            }
+        }
+
+        private static long CalcOmegaPointsFromXP(long xp)
+        {
+            int points = MathHelper.RoundToInt(Math.Sqrt(xp / AdvancementGlobalsPrototype.OmegaXPFactor));
+            return Math.Min(points, GameDatabase.AdvancementGlobalsPrototype.OmegaPointsCap);
         }
 
         #endregion
@@ -1747,16 +1892,17 @@ namespace MHServerEmu.Games.Entities
             return target;
         }
 
-        public bool SetDialogTarget(ulong targetId, ulong interactorId)
+        public bool SetDialogTargetId(ulong targetId, ulong interactorId)
         {
             if (targetId != InvalidId && interactorId != InvalidId)
             {
                 var interactor = Game.EntityManager.GetEntity<WorldEntity>(interactorId);
-                if (interactor == null || interactor.IsInWorld == false) return false;
+                if (interactor == null || interactor.IsInWorld == false)
+                    return false;
 
                 var target = Game.EntityManager.GetEntity<WorldEntity>(targetId);
                 if (ValidateDialogTarget(target, interactorId) == false)
-                    return Logger.WarnReturn(false, $"ValidateDialogTarget false for {target.PrototypeName} with {interactor.PrototypeName}");
+                    return Logger.WarnReturn(false, $"SetDialogTargetId(): Failed to validate dialog target for target=[{target}], interactor=[{interactor}]");
             }
 
             DialogTargetId = targetId;
@@ -2328,8 +2474,6 @@ namespace MHServerEmu.Games.Entities
             amount = (int)(amount * bonusItemFindCurve.GetAt(bonusItemFindRating));
             if (amount <= 0)
                 return true;
-
-            Logger.Debug($"AwardBonusItemFindPoints(): amount={amount} to [{this}]");
 
             int points = Properties[PropertyEnum.BonusItemFindPoints] + amount;
             if (points >= lootGlobalsProto.BonusItemFindNumPointsForBonus)

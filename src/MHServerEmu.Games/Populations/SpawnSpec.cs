@@ -121,7 +121,7 @@ namespace MHServerEmu.Games.Populations
                     var spawner = manager.GetEntity<Spawner>(Group.SpawnerId);
                     if (spawner != null)
                     {
-                        var inventory = spawner.GetInventory(InventoryConvenienceLabel.Summoned);
+                        var inventory = spawner.SummonedInventory;
                         if (inventory != null)
                             settings.InventoryLocation = new(spawner.Id, inventory.PrototypeDataRef);
                     }
@@ -136,6 +136,9 @@ namespace MHServerEmu.Games.Populations
             settings.Actions = Actions;
             settings.SpawnSpec = this;
             settings.IsPopulation = true;
+
+            if (entityProto is ItemPrototype)
+                settings.ItemSpec = Game.LootManager.CreateItemSpec(EntityRef, LootContext.CashShop, null);
 
             ActiveEntity = manager.CreateEntity(settings) as WorldEntity;
 
@@ -203,7 +206,7 @@ namespace MHServerEmu.Games.Populations
             if (Defeat(killer, cleanUp)) Group?.ScheduleClearCluster(ActiveEntity, killer);
         }
 
-        private bool Defeat(WorldEntity killer = null, bool cleanUp = false)
+        public bool Defeat(WorldEntity killer = null, bool cleanUp = false)
         {
             if (State == SpawnState.Destroyed || State == SpawnState.Defeated) return false;
             State = SpawnState.Defeated;
@@ -258,7 +261,7 @@ namespace MHServerEmu.Games.Populations
                 ActiveEntity = null;
             }
 
-            EntitySelectorProto?.SetUniqueEntity(EntityRef, entity.Region, false);
+            EntitySelectorProto?.SetUniqueEntity(EntityRef, entity?.Region, false);
 
             if (destroyGroup)
                 Group?.ScheduleClearCluster(entity, null);
@@ -301,6 +304,7 @@ namespace MHServerEmu.Games.Populations
 
     public class SpawnGroup
     {
+        private static readonly Logger Logger = LogManager.CreateLogger();
         public const ulong InvalidId = 0;
         private EventPointer<ClearClusterEvent> _clearClusterEvent = new();
         private Vector3 _killPosition;
@@ -469,9 +473,13 @@ namespace MHServerEmu.Games.Populations
         private void ReleaseRespawn()
         {
             var manager = PopulationManager;
+            var game = manager.Game;
+
+            bool respawn = SpawnEvent != null && SpawnEvent.RespawnObject;
 
             // Clear reserved place
-            if (Reservation != null) Reservation.State = MarkerState.Free;
+            if (Region != null && Region.TestStatus(RegionStatus.Shutdown) == false) 
+                Reservation?.ResetReservation(true);
 
             if (BlackOutId != BlackOutZone.InvalidId)
             {
@@ -481,19 +489,32 @@ namespace MHServerEmu.Games.Populations
 
             SpawnHeat?.Return();
 
+            if (PopulationObject == null) return;
+            
             // Reschedule SpawnEvent
-            if (SpawnEvent != null && SpawnEvent.RespawnObject)
+            if (respawn)
             {
-                var game = manager.Game;
-                int spawnTimeMS = SpawnEvent.RespawnDelayMS + game.Random.Next(1000);
-                PopulationObject.Time = game.CurrentTime + TimeSpan.FromMilliseconds(spawnTimeMS);
+                var spawnTime = TimeSpan.FromMilliseconds(SpawnEvent.RespawnDelayMS + game.Random.Next(1000));
+
+                if (PopulationManager.DebugMarker(PopulationObject.MarkerRef))
+                    Logger.Debug($"Reschedule SpawnEvent {PopulationObject.MarkerRef.GetNameFormatted()} {spawnTime}");
+
+                PopulationObject.Time = game.CurrentTime + spawnTime;
                 SpawnEvent.AddToScheduler(PopulationObject);
+
+                PopulationObject.SpawnGroupId = InvalidId;
 
                 if (PopulationObject.IsMarker)
                     manager.MarkerSchedule(PopulationObject.MarkerRef);
                 else
                     manager.LocationSchedule();
             }
+            else
+            {
+                PopulationObject.ResetMarker(); // We need reset marker here?
+            }
+
+            PopulationObject = null;            
         }
 
         private void Defeat(bool loot, ulong entityId = Entity.InvalidId, ulong killerId = Entity.InvalidId)
