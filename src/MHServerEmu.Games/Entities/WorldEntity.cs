@@ -158,6 +158,7 @@ namespace MHServerEmu.Games.Entities
         public bool IsDiscoverable { get => CompatibleReplicationChannels.HasFlag(AOINetworkPolicyValues.AOIChannelDiscovery); }
         public bool IsTrackable { get => WorldEntityPrototype?.TrackingDisabled == false; }
         public bool IsLiveTuningEnabled { get => WorldEntityPrototype?.IsLiveTuningEnabled() == true; }
+        public bool IsVacuumable { get => WorldEntityPrototype?.IsVacuumable == true; }
         public Dictionary<ulong, long> TankingContributors { get; private set; }
         public Dictionary<ulong, long> DamageContributors { get; private set; }
         public TagPlayers TagPlayers { get; private set; }
@@ -300,16 +301,13 @@ namespace MHServerEmu.Games.Entities
 
             AdjustSummonCount(-1);
 
-            bool notMissile = this is not Missile;
-            
             // Loot and XP
-            if (this is Agent agent && notMissile && agent is not Avatar && agent.IsTeamUpAgent == false)
-                AwardKillLoot(killer, killFlags, directKiller);
+            AwardKillLoot(killer, killFlags, directKiller);
 
             var region = Region;
 
             // Trigger EntityDead Event
-            if (killFlags.HasFlag(KillFlags.NoDeadEvent) == false && notMissile)
+            if (killFlags.HasFlag(KillFlags.NoDeadEvent) == false && this is not Missile)
             {
                 var player = killer?.GetOwnerOfType<Player>();
                 region?.EntityDeadEvent.Invoke(new(this, killer, player));
@@ -373,6 +371,13 @@ namespace MHServerEmu.Games.Entities
                 Destroy();
             else
                 ScheduleDestroyEvent(removeFromWorldTimer);
+        }
+
+        public void AttachToEntity(WorldEntity target)
+        {
+            if (target == null || this == target) return;
+            if (target.IsInWorld && target.TestStatus(EntityStatus.ExitingWorld) == false)
+                Properties[PropertyEnum.AttachedToEntityId] = target.Id;
         }
 
         #region Summon
@@ -510,7 +515,7 @@ namespace MHServerEmu.Games.Entities
 
             if (summoner is not Avatar avatar) return;
             
-            var vanityKeyword = GameDatabase.KeywordGlobalsPrototype.VanityPetKeyword;
+            var vanityKeyword = GameDatabase.KeywordGlobalsPrototype.VanityPetKeywordPrototype;
             if (HasKeyword(vanityKeyword))
             {
                 var player = avatar.GetOwnerOfType<Player>();
@@ -1855,7 +1860,10 @@ namespace MHServerEmu.Games.Entities
             ApplyHealthPowerResults(powerResults, ultimateOwner);
 
             if (powerResults.IsAvoided == false)
+            {
                 ApplyResourcePowerResults(powerResults);
+                ApplyDamageAccumulationPowerResults(powerResults);
+            }
 
             return true;
         }
@@ -1994,9 +2002,9 @@ namespace MHServerEmu.Games.Entities
             else
             {
                 // Calculate damage delta normally
-                healthDelta -= MathHelper.RoundToInt64(powerResults.Properties[PropertyEnum.Damage, (int)DamageType.Physical]);
-                healthDelta -= MathHelper.RoundToInt64(powerResults.Properties[PropertyEnum.Damage, (int)DamageType.Energy]);
-                healthDelta -= MathHelper.RoundToInt64(powerResults.Properties[PropertyEnum.Damage, (int)DamageType.Mental]);
+                foreach (var kvp in powerResults.Properties.IteratePropertyRange(PropertyEnum.Damage))
+                    healthDelta -= MathHelper.RoundToInt64(kvp.Value);
+
                 healthDelta += MathHelper.RoundToInt64(powerResults.Properties[PropertyEnum.Healing]);
             }
 
@@ -2029,11 +2037,11 @@ namespace MHServerEmu.Games.Entities
                     return false;
             }
 
-            // Now apply the health delta
+            // Calculate the new health value
             health += healthDelta;
             health = Math.Clamp(health, Properties[PropertyEnum.HealthMin], Properties[PropertyEnum.HealthMax]);
 
-            // Change health to the new value
+            // Trigger health events
             WorldEntity powerUser = Game.EntityManager.GetEntity<WorldEntity>(powerResults.PowerOwnerId);
 
             long adjustHealth = health - startHealth;
@@ -2047,6 +2055,10 @@ namespace MHServerEmu.Games.Entities
                 region.AdjustHealthEvent.Invoke(new(this, ultimateOwner, player, adjustHealth, isDodged));
             }
 
+            if (powerResults.IsAvoided)
+                return false;
+
+            // Apply health change
             bool killed = false;
 
             if (health <= 0 && Properties[PropertyEnum.AIDefeated] == false)
@@ -2083,20 +2095,24 @@ namespace MHServerEmu.Games.Entities
                         TryActivateOnDeathProcs(powerResults);
                 }
 
-                var killFlags = KillFlags.None;
-                if (powerResults != null)
+                // Check health again in case a cheat death proc activated
+                if (Properties[PropertyEnum.Health] <= 0L)
                 {
-                    if (powerResults.Properties[PropertyEnum.NoLootDrop])
-                        killFlags |= KillFlags.NoLoot;
-                    if (powerResults.Properties[PropertyEnum.NoExpOnDeath])
-                        killFlags |= KillFlags.NoExp;
-                    if (powerResults.Properties[PropertyEnum.OnKillDestroyImmediate])
-                        killFlags |= KillFlags.DestroyImmediate;
-                }
+                    var killFlags = KillFlags.None;
+                    if (powerResults != null)
+                    {
+                        if (powerResults.Properties[PropertyEnum.NoLootDrop])
+                            killFlags |= KillFlags.NoLoot;
+                        if (powerResults.Properties[PropertyEnum.NoExpOnDeath])
+                            killFlags |= KillFlags.NoExp;
+                        if (powerResults.Properties[PropertyEnum.OnKillDestroyImmediate])
+                            killFlags |= KillFlags.DestroyImmediate;
+                    }
 
-                Kill(ultimateOwner, killFlags, powerUser);
-                killed = true;
-                TriggerEntityActionEvent(EntitySelectorActionEventType.OnGotKilled);
+                    Kill(ultimateOwner, killFlags, powerUser);
+                    killed = true;
+                    TriggerEntityActionEvent(EntitySelectorActionEventType.OnGotKilled);
+                }
             }
             else
             {
@@ -2181,6 +2197,42 @@ namespace MHServerEmu.Games.Entities
             secondaryResource += secondaryResourceChange;
             secondaryResource = Math.Clamp(secondaryResource, 0f, Properties[PropertyEnum.SecondaryResourceMax]);
             Properties[PropertyEnum.SecondaryResource] = secondaryResource;
+        }
+
+        private void ApplyDamageAccumulationPowerResults(PowerResults powerResults)
+        {
+            ConditionCollection conditionCollection = ConditionCollection;
+            if (conditionCollection == null)
+                return;
+
+            Dictionary<DamageType, float> adjustDict = DictionaryPool<DamageType, float>.Instance.Get();
+
+            foreach (Condition condition in conditionCollection)
+            {
+                PropertyCollection conditionProps = condition.Properties;
+
+                foreach (var kvp in conditionProps.IteratePropertyRange(PropertyEnum.DamageAccumulationLimit))
+                {
+                    Property.FromParam(kvp.Key, 0, out int damageTypeValue);
+                    DamageType damageType = (DamageType)damageTypeValue;
+
+                    float damageAccumulationChange = powerResults.Properties[PropertyEnum.DamageAccumulationChange, damageType];
+                    if (damageAccumulationChange == 0f)
+                        continue;
+
+                    float accumulationLimit = GetDamageAccumulationLimit(conditionProps, damageType);
+                    accumulationLimit -= conditionProps[PropertyEnum.DamageAccumulation, damageType];
+
+                    adjustDict.Add(damageType, Math.Min(damageAccumulationChange, accumulationLimit));
+                }
+
+                foreach (var kvp in adjustDict)
+                    conditionProps.AdjustProperty(kvp.Value, new(PropertyEnum.DamageAccumulation, kvp.Key));
+
+                adjustDict.Clear();
+            }
+
+            DictionaryPool<DamageType, float>.Instance.Return(adjustDict);
         }
 
         public void ApplyPropertyTicker(PropertyTicker.TickData tickData)
@@ -2457,6 +2509,32 @@ namespace MHServerEmu.Games.Entities
 
                     break;
             }
+        }
+
+        public float GetDamageAccumulationLimit(PropertyCollection conditionProperties, DamageType damageType)
+        {
+            float damageAccumulationLimit = conditionProperties[PropertyEnum.DamageAccumulationLimit, damageType];
+
+            if (damageAccumulationLimit > 0f)
+                damageAccumulationLimit += Properties[PropertyEnum.DamageAccumulationLimitBonus];
+
+            PropertyInfoTable propertyInfoTable = GameDatabase.PropertyInfoTable;
+            foreach (var kvp in conditionProperties.IteratePropertyRange(PropertyEnum.DamageShieldScaleByStat))
+            {
+                Property.FromParam(kvp.Key, 0, out PrototypeId propertyInfoProtoRef);
+                if (propertyInfoProtoRef == PrototypeId.Invalid)
+                    continue;
+
+                PropertyEnum scaleByProperty = propertyInfoTable.GetPropertyEnumFromPrototype(propertyInfoProtoRef);
+                float scaleByValue = Properties[scaleByProperty];
+                damageAccumulationLimit += scaleByValue * kvp.Value;
+            }
+
+            float damageAccumScaleByPlayers = conditionProperties[PropertyEnum.DamageAccumScaleByPlayers];
+            if (damageAccumScaleByPlayers > 0f)
+                damageAccumulationLimit *= damageAccumScaleByPlayers;
+
+            return damageAccumulationLimit;
         }
 
         public void TriggerEntityActionEventAlly(EntitySelectorActionEventType eventType)
@@ -3454,9 +3532,10 @@ namespace MHServerEmu.Games.Entities
             if (oldRegion == newRegion)
                 return;
 
-            Properties[PropertyEnum.MapRegionId] = newRegion != null ? newRegion.Id : 0;
+            if (newRegion != null)
+                ApplyLootTableSourceOverrides(newRegion);
 
-            // TODO other events
+            Properties[PropertyEnum.MapRegionId] = newRegion != null ? newRegion.Id : 0;
         }
 
         public virtual void OnLocomotionStateChanged(LocomotionState oldLocomotionState, LocomotionState newLocomotionState)
@@ -3596,6 +3675,9 @@ namespace MHServerEmu.Games.Entities
 
         public bool AwardKillLoot(WorldEntity killer, KillFlags killFlags, WorldEntity directKiller)
         {
+            if (this is Missile || this is Hotspot)
+                return false;
+
             if (IsInWorld == false)
                 return false;
 
@@ -3683,9 +3765,6 @@ namespace MHServerEmu.Games.Entities
                 tables[numTables++] = (lootTableProtoRef, actionType);
             }
 
-            if (numTables == 0)
-                return true;
-
             tables = tables[..numTables];
 
             // Roll and distribute the rewards
@@ -3756,6 +3835,65 @@ namespace MHServerEmu.Games.Entities
                 player.AwardBonusItemFindPoints(bonusItemFindPoints, settings);
             }
 
+            return true;
+        }
+
+        private bool ApplyLootTableSourceOverrides(Region region)
+        {
+            // See if we have an override source (e.g. this is used primarily for chests with variable rewards in Holo-Sim / X-Defense / Danger Room)
+            AssetId lootTableSource = Properties[PropertyEnum.LootTableSource];
+            if (lootTableSource == AssetId.Invalid)
+                return true;
+
+            WorldEntityPrototype worldEntityProto = WorldEntityPrototype;
+            RegionPrototype regionProto = region.Prototype;
+
+            Dictionary<PropertyId, PropertyValue> overrides = DictionaryPool<PropertyId, PropertyValue>.Instance.Get();
+
+            foreach (var kvp in Properties.IteratePropertyRange(PropertyEnum.LootTablePrototype))
+            {
+                Property.FromParam(kvp.Key, 0, out int lootEventValue);
+                LootDropEventType lootEvent = (LootDropEventType)lootEventValue;
+                PrototypeId lootTableOverrideRef = PrototypeId.Invalid;
+
+                // Region property overrides (e.g. affixes) take priority over the region prototype
+
+                // Check event-specific events
+                AssetId lootEventAsset = Property.PropertyEnumToAsset(PropertyEnum.LootTablePrototype, 0, (int)lootEvent);
+                lootTableOverrideRef = region.Properties[PropertyEnum.LootSourceTableOverride, lootTableSource, lootEventAsset];
+                if (lootTableOverrideRef != PrototypeId.Invalid)
+                {
+                    overrides[kvp.Key] = lootTableOverrideRef;
+                    continue;
+                }
+
+                // Region property overrides for unspecified events (OnKilled / OnInteractedWith)
+                if (lootEvent == LootDropEventType.OnKilled || lootEvent == LootDropEventType.OnInteractedWith)
+                {
+                    lootEventAsset = Property.PropertyEnumToAsset(PropertyEnum.LootTablePrototype, 0, (int)LootDropEventType.None);
+                    lootTableOverrideRef = region.Properties[PropertyEnum.LootSourceTableOverride, lootTableSource, lootEventAsset];
+                    if (lootTableOverrideRef != PrototypeId.Invalid)
+                    {
+                        overrides[kvp.Key] = lootTableOverrideRef;
+                        continue;
+                    }
+                }
+
+                // Region prototype overrides
+                lootTableOverrideRef = regionProto.GetLootTableOverride(this, lootTableSource, lootEvent);
+                if (lootTableOverrideRef != PrototypeId.Invalid)
+                {
+                    overrides[kvp.Key] = lootTableOverrideRef;
+                    continue;
+                }
+
+                Logger.Warn($"ApplyLootTableSourceOverrides(): Failed to find override for loot table source {lootTableSource.GetName()} for entity [{this}] in region [{region}]");
+            }
+
+            foreach (var kvp in overrides)
+                Properties[kvp.Key] = kvp.Value;
+
+            DictionaryPool<PropertyId, PropertyValue>.Instance.Return(overrides);
             return true;
         }
 

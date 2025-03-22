@@ -4,7 +4,6 @@ using MHServerEmu.Core.Collections;
 using MHServerEmu.Core.Extensions;
 using MHServerEmu.Core.Logging;
 using MHServerEmu.Core.Memory;
-using MHServerEmu.Core.Network;
 using MHServerEmu.Core.Serialization;
 using MHServerEmu.Games.Common;
 using MHServerEmu.Games.Entities.Avatars;
@@ -529,8 +528,6 @@ namespace MHServerEmu.Games.Entities
                 success = true;
                 //Logger.Trace($"AddCondition(): {condition} - {condition.Duration.TotalMilliseconds} ms");
 
-                condition.Properties.Bind(_owner, AOINetworkPolicyValues.AllChannels);
-
                 // Trigger additional effects
                 WorldEntity creator = _owner.Game.EntityManager.GetEntity<WorldEntity>(condition.CreatorId);
                 PowerPrototype powerProto = condition.CreatorPowerPrototype;
@@ -690,6 +687,11 @@ namespace MHServerEmu.Games.Entities
             }
 
             return true;
+        }
+
+        public void RemoveConditionsWithConditionPrototypeRef(PrototypeId protoRef)
+        {
+            RemoveConditionsFiltered(ConditionFilter.IsConditionWithPrototypeFunc, protoRef);
         }
 
         public void RemoveConditionsWithKeyword(PrototypeId keywordProtoRef)
@@ -950,6 +952,7 @@ namespace MHServerEmu.Games.Entities
                 return Logger.WarnReturn(false, $"InsertCondition(): Failed to insert condition id {condition.Id} for [{_owner}]");
 
             condition.Collection = this;
+            condition.Properties.Bind(_owner, AOINetworkPolicyValues.AllChannels);
             return true;
         }
 
@@ -1072,7 +1075,33 @@ namespace MHServerEmu.Games.Entities
 
         private void OnPreAccrueCondition(Condition condition)
         {
+            StatusEffectEvent(condition, false);
+        }
 
+        private void StatusEffectEvent(Condition condition, bool ownerStatus)
+        {
+            var region = _owner?.Region;
+            if (region == null) return;
+
+            var manager = _owner.Game?.EntityManager;
+            if (manager == null) return;
+
+            foreach (var prop in condition.Properties)
+            {
+                bool conditionValue = prop.Value != 0;
+                bool ownerValue = _owner.Properties[prop.Key];
+                if (conditionValue == ownerValue) continue;
+
+                var creator = manager.GetEntity<WorldEntity>(condition.CreatorId);
+                var avatar = creator?.GetMostResponsiblePowerUser<Avatar>();
+                var player = avatar?.GetOwnerOfType<Player>();
+
+                var statusProp = prop.Key.Enum;
+                bool status = ownerStatus ? ownerValue : conditionValue;
+                var propInfo = GameDatabase.PropertyInfoTable.LookupPropertyInfo(statusProp);
+                bool negativeStatus = Condition.IsANegativeStatusEffectProperty(propInfo.PrototypeDataRef);
+                region.EntityStatusEffectEvent.Invoke(new(_owner, player, statusProp, status, negativeStatus));
+            }
         }
 
         private void OnPostAccrueCondition(Condition condition)
@@ -1135,6 +1164,8 @@ namespace MHServerEmu.Games.Entities
             _owner.UpdateProcEffectPowers(condition.Properties, false);
             if (handle.Valid() == false)
                 return;
+
+            StatusEffectEvent(condition, true);
         }
 
         private bool EnableCondition(Condition condition, bool enable)
@@ -1244,8 +1275,8 @@ namespace MHServerEmu.Games.Entities
                 EventPointer<RemoveConditionEvent> removeEvent = new();
                 condition.RemoveEvent = removeEvent;
 
-                _owner.Game.GameEventScheduler.ScheduleEvent(removeEvent, timeRemaining, _pendingEvents);
-                removeEvent.Get().Initialize(this, condition.Id);
+                if (_owner.Game.GameEventScheduler.ScheduleEvent(removeEvent, timeRemaining, _pendingEvents))
+                    removeEvent.Get().Initialize(this, condition.Id);
             }
 
             return true;

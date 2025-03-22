@@ -208,30 +208,12 @@ namespace MHServerEmu.Games.Network
                 }
             }
 
-            Player.SetAvatarLibraryProperties();
-
-            // Create team-up entities if there are none
-            // REMOVEME: Let players buy team-ups from the store instead
-            if (Game.GameOptions.TeamUpSystemEnabled)
-            {
-                Inventory teamUpLibrary = Player.GetInventory(InventoryConvenienceLabel.TeamUpLibrary);
-                if (teamUpLibrary.Count == 0)
-                {
-                    foreach (PrototypeId teamUpRef in dataDirectory.IteratePrototypesInHierarchy<AgentTeamUpPrototype>(PrototypeIterateFlags.NoAbstractApprovedOnly))
-                    {
-                        using EntitySettings teamUpSettings = ObjectPoolManager.Instance.Get<EntitySettings>();
-                        teamUpSettings.EntityRef = teamUpRef;
-                        teamUpSettings.InventoryLocation = new(Player.Id, teamUpLibrary.PrototypeDataRef);
-
-                        Agent teamUpAgent = entityManager.CreateEntity(teamUpSettings) as Agent;
-                        teamUpAgent?.InitializeLevel(1);
-                    }
-                }
-            }
-
             // Apply versioning if needed
             if (PlayerVersioning.Apply(Player) == false)
                 return false;
+
+            Player.SetAvatarLibraryProperties();
+            Player.SetTeamUpLibraryProperties();
 
             return true;
         }
@@ -296,7 +278,9 @@ namespace MHServerEmu.Games.Network
         /// </remarks>
         public void FlushMessages()
         {
-            if (_pendingMessageList.Any() == false) return;
+            if (_pendingMessageList.Count == 0)
+                return;
+            
             _frontendClient.SendMessages(MuxChannel, _pendingMessageList);
             _pendingMessageList.Clear();
         }
@@ -467,6 +451,7 @@ namespace MHServerEmu.Games.Network
                 case ClientToGameServerMessage.NetMessageTryCancelActivePower:              OnTryCancelActivePower(message); break;             // 13
                 case ClientToGameServerMessage.NetMessageContinuousPowerUpdateToServer:     OnContinuousPowerUpdate(message); break;            // 14
                 case ClientToGameServerMessage.NetMessageCancelPendingAction:               OnCancelPendingAction(message); break;              // 15
+                case ClientToGameServerMessage.NetMessageGamepadMetric:                     OnGamepadMetric(message); break;                    // 31
                 case ClientToGameServerMessage.NetMessagePickupInteraction:                 OnPickupInteraction(message); break;                // 32
                 case ClientToGameServerMessage.NetMessageTryInventoryMove:                  OnTryInventoryMove(message); break;                 // 33
                 case ClientToGameServerMessage.NetMessageInventoryTrashItem:                OnInventoryTrashItem(message); break;               // 35
@@ -476,6 +461,7 @@ namespace MHServerEmu.Games.Network
                 case ClientToGameServerMessage.NetMessageUseWaypoint:                       OnUseWaypoint(message); break;                      // 40
                 case ClientToGameServerMessage.NetMessageSwitchAvatar:                      OnSwitchAvatar(message); break;                     // 42
                 case ClientToGameServerMessage.NetMessageChangeDifficulty:                  OnChangeDifficulty(message); break;                 // 43
+                case ClientToGameServerMessage.NetMessageRefreshAbilityKeyMapping:          OnRefreshAbilityKeyMapping(message); break;         // 45
                 case ClientToGameServerMessage.NetMessageAbilitySlotToAbilityBar:           OnAbilitySlotToAbilityBar(message); break;          // 46
                 case ClientToGameServerMessage.NetMessageAbilityUnslotFromAbilityBar:       OnAbilityUnslotFromAbilityBar(message); break;      // 47
                 case ClientToGameServerMessage.NetMessageAbilitySwapInAbilityBar:           OnAbilitySwapInAbilityBar(message); break;          // 48
@@ -484,7 +470,9 @@ namespace MHServerEmu.Games.Network
                 case ClientToGameServerMessage.NetMessageReturnToHub:                       OnReturnToHub(message); break;                      // 55
                 case ClientToGameServerMessage.NetMessageRequestMissionRewards:             OnRequestMissionRewards(message); break;            // 57
                 case ClientToGameServerMessage.NetMessageRequestRemoveAndKillControlledAgent:   OnRequestRemoveAndKillControlledAgent(message); break;   // 58
+                case ClientToGameServerMessage.NetMessageDamageMeter:                       OnDamageMeter(message); break;                      // 59
                 case ClientToGameServerMessage.NetMessageMetaGameUpdateNotification:        OnMetaGameUpdateNotification(message); break;       // 63
+                case ClientToGameServerMessage.NetMessagePurchaseUnlock:                    OnPurchaseUnlock(message); break;                   // 72
                 case ClientToGameServerMessage.NetMessageNotifyFullscreenMovieStarted:      OnNotifyFullscreenMovieStarted(message); break;     // 84
                 case ClientToGameServerMessage.NetMessageNotifyFullscreenMovieFinished:     OnNotifyFullscreenMovieFinished(message); break;    // 85
                 case ClientToGameServerMessage.NetMessageNotifyLoadingScreenFinished:       OnNotifyLoadingScreenFinished(message); break;      // 86
@@ -516,11 +504,13 @@ namespace MHServerEmu.Games.Network
                 case ClientToGameServerMessage.NetMessageRespecOmegaBonus:                  OnRespecOmegaBonus(message); break;                 // 133
                 case ClientToGameServerMessage.NetMessageNewItemGlintPlayed:                OnNewItemGlintPlayed(message); break;               // 135
                 case ClientToGameServerMessage.NetMessageNewItemHighlightCleared:           OnNewItemHighlightCleared(message); break;          // 136
+                case ClientToGameServerMessage.NetMessageUnassignMappedPower:               OnUnassignMappedPower(message); break;              // 138
                 case ClientToGameServerMessage.NetMessageAssignStolenPower:                 OnAssignStolenPower(message); break;                // 139
                 case ClientToGameServerMessage.NetMessageVanityTitleSelect:                 OnVanityTitleSelect(message); break;                // 140
                 case ClientToGameServerMessage.NetMessagePlayerTradeCancel:                 OnPlayerTradeCancel(message); break;                // 144
                 case ClientToGameServerMessage.NetMessageChangeCameraSettings:              OnChangeCameraSettings(message); break;             // 148
                 case ClientToGameServerMessage.NetMessageUISystemLockState:                 OnUISystemLockState(message); break;                // 150
+                case ClientToGameServerMessage.NetMessageEnableTalentPower:                 OnEnableTalentPower(message); break;                // 151
                 case ClientToGameServerMessage.NetMessageStashInventoryViewed:              OnStashInventoryViewed(message); break;             // 152
                 case ClientToGameServerMessage.NetMessageStashCurrentlyOpen:                OnStashCurrentlyOpen(message); break;               // 153
                 case ClientToGameServerMessage.NetMessageWidgetButtonResult:                OnWidgetButtonResult(message); break;               // 154
@@ -543,7 +533,6 @@ namespace MHServerEmu.Games.Network
                 case ClientToGameServerMessage.NetMessageGetCurrencyBalance:                                                                    // 69
                 case ClientToGameServerMessage.NetMessageBuyItemFromCatalog:                                                                    // 70
                 case ClientToGameServerMessage.NetMessageBuyGiftForOtherPlayer:                                                                 // 71
-                case ClientToGameServerMessage.NetMessagePurchaseUnlock:                                                                        // 72
                 case ClientToGameServerMessage.NetMessageGetGiftHistory:                                                                        // 73
                     ServerManager.Instance.RouteMessage(_frontendClient, message, ServerType.Billing);
                     break;
@@ -850,6 +839,16 @@ namespace MHServerEmu.Games.Network
             return true;
         }
 
+        private bool OnGamepadMetric(MailboxMessage message)    // 31
+        {
+            var gamepadMetric = message.As<NetMessageGamepadMetric>();
+            if (gamepadMetric == null) return Logger.WarnReturn(false, $"OnGamepadMetric(): Failed to retrieve message");
+
+            // Dummy handler, we are not interested in gamepad metrics
+            //Logger.Trace($"OnGamepadMetric():\n{gamepadMetric}");
+            return true;
+        }
+
         private bool OnPickupInteraction(MailboxMessage message)    // 32
         {
             var pickupInteraction = message.As<NetMessagePickupInteraction>();
@@ -1053,47 +1052,67 @@ namespace MHServerEmu.Games.Network
             return true;
         }
 
+        private bool OnRefreshAbilityKeyMapping(MailboxMessage message) // 45
+        {
+            var refreshAbilityKeyMapping = message.As<NetMessageRefreshAbilityKeyMapping>();
+            if (refreshAbilityKeyMapping == null) return Logger.WarnReturn(false, $"OnRefreshAbilityKeyMapping(): Failed to retrieve message");
+
+            Avatar avatar = Game.EntityManager.GetEntity<Avatar>(refreshAbilityKeyMapping.AvatarId);
+            if (avatar == null) return Logger.WarnReturn(false, "OnRefreshAbilityKeyMapping(): avatar == null");
+
+            Player owner = avatar.GetOwnerOfType<Player>();
+            if (owner != Player)
+                return Logger.WarnReturn(false, $"OnRefreshAbilityKeyMapping(): Player [{Player}] is attempting to refresh ability key mapping for avatar [{avatar}] that belongs to another player");
+
+            avatar.RefreshAbilityKeyMapping(false);
+            return true;
+        }
+
         private bool OnAbilitySlotToAbilityBar(MailboxMessage message)  // 46
         {
-            var slotToAbilityBar = message.As<NetMessageAbilitySlotToAbilityBar>();
-            if (slotToAbilityBar == null) return Logger.WarnReturn(false, $"OnAbilitySlotToAbilityBar(): Failed to retrieve message");
+            var abilitySlotToAbilityBar = message.As<NetMessageAbilitySlotToAbilityBar>();
+            if (abilitySlotToAbilityBar == null) return Logger.WarnReturn(false, $"OnAbilitySlotToAbilityBar(): Failed to retrieve message");
 
-            var abilityKeyMapping = Player.CurrentAvatar.CurrentAbilityKeyMapping;
-            PrototypeId prototypeRefId = (PrototypeId)slotToAbilityBar.PrototypeRefId;
-            AbilitySlot slotNumber = (AbilitySlot)slotToAbilityBar.SlotNumber;
+            Avatar avatar = Game.EntityManager.GetEntity<Avatar>(abilitySlotToAbilityBar.AvatarId);
+            if (avatar == null) return Logger.WarnReturn(false, "OnAbilitySlotToAbilityBar(): avatar == null");
 
-            // Set
-            abilityKeyMapping.SetAbilityInAbilitySlot(prototypeRefId, slotNumber);
+            Player owner = avatar.GetOwnerOfType<Player>();
+            if (owner != Player)
+                return Logger.WarnReturn(false, $"OnAbilitySlotToAbilityBar(): Player [{Player}] is attempting to slot ability for avatar [{avatar}] that belongs to another player");
+
+            avatar.SlotAbility((PrototypeId)abilitySlotToAbilityBar.PrototypeRefId, (AbilitySlot)abilitySlotToAbilityBar.SlotNumber, false, false);
             return true;
         }
 
         private bool OnAbilityUnslotFromAbilityBar(MailboxMessage message)  // 47
         {
-            var unslotFromAbilityBar = message.As<NetMessageAbilityUnslotFromAbilityBar>();
-            if (unslotFromAbilityBar == null) return Logger.WarnReturn(false, $"OnAbilityUnslotFromAbilityBar(): Failed to retrieve message");
+            var abilityUnslotFromAbilityBar = message.As<NetMessageAbilityUnslotFromAbilityBar>();
+            if (abilityUnslotFromAbilityBar == null) return Logger.WarnReturn(false, $"OnAbilityUnslotFromAbilityBar(): Failed to retrieve message");
 
-            var abilityKeyMapping = Player.CurrentAvatar.CurrentAbilityKeyMapping;
-            AbilitySlot slotNumber = (AbilitySlot)unslotFromAbilityBar.SlotNumber;
+            Avatar avatar = Game.EntityManager.GetEntity<Avatar>(abilityUnslotFromAbilityBar.AvatarId);
+            if (avatar == null) return Logger.WarnReturn(false, "OnAbilityUnslotFromAbilityBar(): avatar == null");
 
-            // Remove by assigning invalid id
-            abilityKeyMapping.SetAbilityInAbilitySlot(PrototypeId.Invalid, slotNumber);
+            Player owner = avatar.GetOwnerOfType<Player>();
+            if (owner != Player)
+                return Logger.WarnReturn(false, $"OnAbilityUnslotFromAbilityBar(): Player [{Player}] is attempting to unslot ability for avatar [{avatar}] that belongs to another player");
+
+            avatar.UnslotAbility((AbilitySlot)abilityUnslotFromAbilityBar.SlotNumber, false);
             return true;
         }
 
         private bool OnAbilitySwapInAbilityBar(MailboxMessage message)  // 48
         {
-            var swapInAbilityBar = message.As<NetMessageAbilitySwapInAbilityBar>();
-            if (swapInAbilityBar == null) return Logger.WarnReturn(false, $"OnAbilitySwapInAbilityBar(): Failed to retrieve message");
+            var abilitySwapInAbilityBar = message.As<NetMessageAbilitySwapInAbilityBar>();
+            if (abilitySwapInAbilityBar == null) return Logger.WarnReturn(false, $"OnAbilitySwapInAbilityBar(): Failed to retrieve message");
 
-            var abilityKeyMapping = Player.CurrentAvatar.CurrentAbilityKeyMapping;
-            AbilitySlot slotA = (AbilitySlot)swapInAbilityBar.SlotNumberA;
-            AbilitySlot slotB = (AbilitySlot)swapInAbilityBar.SlotNumberB;
+            Avatar avatar = Game.EntityManager.GetEntity<Avatar>(abilitySwapInAbilityBar.AvatarId);
+            if (avatar == null) return Logger.WarnReturn(false, "OnAbilitySwapInAbilityBar(): avatar == null");
 
-            // Swap
-            PrototypeId prototypeA = abilityKeyMapping.GetAbilityInAbilitySlot(slotA);
-            PrototypeId prototypeB = abilityKeyMapping.GetAbilityInAbilitySlot(slotB);
-            abilityKeyMapping.SetAbilityInAbilitySlot(prototypeB, slotA);
-            abilityKeyMapping.SetAbilityInAbilitySlot(prototypeA, slotB);
+            Player owner = avatar.GetOwnerOfType<Player>();
+            if (owner != Player)
+                return Logger.WarnReturn(false, $"OnAbilitySwapInAbilityBar(): Player [{Player}] is attempting to swap abilities for avatar [{avatar}] that belongs to another player");
+
+            avatar.SwapAbilities((AbilitySlot)abilitySwapInAbilityBar.SlotNumberA, (AbilitySlot)abilitySwapInAbilityBar.SlotNumberB, false);
             return true;
         }
 
@@ -1192,7 +1211,17 @@ namespace MHServerEmu.Games.Network
             return true;
         }
 
-        private bool OnMetaGameUpdateNotification(MailboxMessage message)
+        private bool OnDamageMeter(MailboxMessage message) // 59
+        {
+            var damageMeter = message.As<NetMessageDamageMeter>();
+            if (damageMeter == null) return Logger.WarnReturn(false, $"OnDamageMeter(): Failed to retrieve message");
+
+            // Dummy handler, we are currently not interested in damage meter metrics
+            //Logger.Trace($"OnDamageMeter():\n{damageMeter}");
+            return true;
+        }
+
+        private bool OnMetaGameUpdateNotification(MailboxMessage message)   // 63
         {
             var metaGameUpdate = message.As<NetMessageMetaGameUpdateNotification>();
             if (metaGameUpdate == null) return Logger.WarnReturn(false, $"OnMetaGameUpdateNotification(): Failed to retrieve message");
@@ -1201,7 +1230,21 @@ namespace MHServerEmu.Games.Network
             return true;
         }
 
-        private bool OnNotifyFullscreenMovieStarted(MailboxMessage message)
+        private bool OnPurchaseUnlock(MailboxMessage message)   // 72
+        {
+            var purchaseUnlock = message.As<NetMessagePurchaseUnlock>();
+            if (purchaseUnlock == null) return Logger.WarnReturn(false, $"OnPurchaseUnlock(): Failed to retrieve message");
+
+            PurchaseUnlockResult result = Player.PurchaseUnlock((PrototypeId)purchaseUnlock.AgentPrototypeId);
+
+            SendMessage(NetMessagePurchaseUnlockResponse.CreateBuilder()
+                .SetPurchaseUnlockResult((uint)result)
+                .Build());
+
+            return true;
+        }
+
+        private bool OnNotifyFullscreenMovieStarted(MailboxMessage message) // 84
         {
             var movieStarted = message.As<NetMessageNotifyFullscreenMovieStarted>();
             if (movieStarted == null) return Logger.WarnReturn(false, $"OnNotifyFullscreenMovieStarted(): Failed to retrieve message");
@@ -1369,7 +1412,6 @@ namespace MHServerEmu.Games.Network
             if (tryMoveInventoryContentsToGeneral == null) return Logger.WarnReturn(false, $"OnTryMoveInventoryContentsToGeneral(): Failed to retrieve message");
 
             PrototypeId sourceInventoryProtoRef = (PrototypeId)tryMoveInventoryContentsToGeneral.SourceInventoryPrototype;
-            Logger.Debug($"OnTryMoveInventoryContentsToGeneral(): {sourceInventoryProtoRef.GetName()} for {Player}");
 
             Inventory sourceInventory = Player.GetInventoryByRef(sourceInventoryProtoRef);
             if (sourceInventory == null)
@@ -1425,10 +1467,22 @@ namespace MHServerEmu.Games.Network
             // Validate ownership
             Player owner = avatar.GetOwnerOfType<Player>();
             if (owner != Player)
-                return Logger.WarnReturn(false, $"OnSelectAvatarSynergies(): {this} is attempting to set synergies of avatar {avatar} that does not belong to it!");
+                return Logger.WarnReturn(false, $"OnSelectAvatarSynergies(): Player [{Player}] is attempting to select avatar synergies for avatar [{avatar}] that belongs to another player");
 
+            // Check synergy limit
+            int synergyCount = selectAvatarSynergies.AvatarPrototypesCount;
+            int synergyCountLimit = GameDatabase.GlobalsPrototype.AvatarSynergyConcurrentLimit;
+            if (synergyCount > synergyCountLimit)
+                return Logger.WarnReturn(false, $"OnSelectAvatarSynergies(): Player [{Player}] is attempting to select more avatar synergies ({synergyCount}) than allowed ({synergyCountLimit})");
+
+            // Do not allow to change synergies in combat
+            if (avatar.Properties[PropertyEnum.IsInCombat])
+                return false;
+
+            // Clean up existing synergy selections
             avatar.Properties.RemovePropertyRange(PropertyEnum.AvatarSynergySelected);
 
+            // Apply new selections
             foreach (ulong avatarProtoId in selectAvatarSynergies.AvatarPrototypesList)
             {
                 PrototypeId avatarProtoRef = (PrototypeId)avatarProtoId;
@@ -1440,17 +1494,19 @@ namespace MHServerEmu.Games.Network
                     continue;
                 }
 
-                // TODO: Get level from prototypes and take prestige into account
-                Avatar synergyAvatar = owner.GetAvatar(avatarProtoRef);
-                if (synergyAvatar.CharacterLevel < 25)
+                int maxAvatarLevel = Player.GetMaxCharacterLevelAttainedForAvatar(avatarProtoRef);
+                if (maxAvatarLevel < avatarProto.SynergyUnlockLevel)
                 {
-                    Logger.Warn("OnSelectAvatarSynergies(): Attempting to set locked synergy");
+                    Logger.Warn("OnSelectAvatarSynergies(): maxAvatarLevel < avatarProto.SynergyUnlockLevel");
                     continue;
                 }
 
                 avatar.Properties[PropertyEnum.AvatarSynergySelected, avatarProtoRef] = true;
+                Player.Properties.RemoveProperty(new(PropertyEnum.AvatarSynergyNewUnlock, avatarProtoRef));
             }
 
+            // Update the synergy condition
+            avatar.UpdateAvatarSynergyCondition();
             return true;
         }
 
@@ -1620,9 +1676,24 @@ namespace MHServerEmu.Games.Network
             var newItemGlintPlayed = message.As<NetMessageNewItemGlintPlayed>();
             if (newItemGlintPlayed == null) return Logger.WarnReturn(false, $"OnNewItemGlintPlayed(): Failed to retrieve message");
 
-            Logger.Warn($"OnNewItemGlintPlayed(): {newItemGlintPlayed}");
+            if (Player.Id != newItemGlintPlayed.PlayerId)
+                return Logger.WarnReturn(false, $"OnNewItemGlintPlayed(): Player entity id mismatch, expected {Player.Id}, got {newItemGlintPlayed.PlayerId}");
 
-            // What causes this to be sent? Do we need it?
+            EntityManager entityManager = Game.EntityManager;
+
+            for (int i = 0; i < newItemGlintPlayed.ItemIdsCount; i++)
+            {
+                ulong itemId = newItemGlintPlayed.ItemIdsList[i];
+                Item item = entityManager.GetEntity<Item>(itemId);
+                if (item == null)
+                    return Logger.WarnReturn(false, "OnNewItemGlintPlayed(): item == null");
+
+                Player owner = item.GetOwnerOfType<Player>();
+                if (owner != Player)
+                    return Logger.WarnReturn(false, $"OnNewItemGlintPlayed(): Player [{Player}] attempted to clear glint of item [{item}] belonging to other player [{owner}]");
+
+                item.Properties.RemoveProperty(PropertyEnum.ItemRecentlyAddedGlint);
+            }
 
             return true;
         }
@@ -1640,9 +1711,25 @@ namespace MHServerEmu.Games.Network
 
             Player owner = item.GetOwnerOfType<Player>();
             if (owner != Player)
-                return Logger.WarnReturn(false, $"OnNewItemHighlightCleared(): Player {Player} attempted to clear highlight of item {item} belonging to other player {owner}");
+                return Logger.WarnReturn(false, $"OnNewItemHighlightCleared(): Player [{Player}] attempted to clear highlight of item [{item}] belonging to other player [{owner}]");
 
             item.SetRecentlyAdded(false);
+            return true;
+        }
+
+        private bool OnUnassignMappedPower(MailboxMessage message)  // 138
+        {
+            var unassignMappedPower = message.As<NetMessageUnassignMappedPower>();
+            if (unassignMappedPower == null) return Logger.WarnReturn(false, $"OnUnassignMappedPower(): Failed to retrieve message");
+
+            Avatar avatar = Game.EntityManager.GetEntity<Avatar>(unassignMappedPower.AvatarId);
+            if (avatar == null) return Logger.WarnReturn(false, "OnUnassignMappedPower(): avatar == null");
+
+            Player owner = avatar.GetOwnerOfType<Player>();
+            if (owner != Player)
+                return Logger.WarnReturn(false, $"OnUnassignMappedPower(): Player [{Player}] is attempting to unassign mapped power for avatar [{avatar}] that belongs to another player");
+
+            avatar.UnassignMappedPower((PrototypeId)unassignMappedPower.MappedPowerProtoId);
             return true;
         }
 
@@ -1651,12 +1738,29 @@ namespace MHServerEmu.Games.Network
             var assignStolenPower = message.As<NetMessageAssignStolenPower>();
             if (assignStolenPower == null) return Logger.WarnReturn(false, $"OnAssignStolenPower(): Failed to retrieve message");
 
+            Avatar avatar = Game.EntityManager.GetEntity<Avatar>(assignStolenPower.AvatarId);
+            if (avatar == null) return Logger.WarnReturn(false, "OnAssignStolenPower(): avatar == null");
+
+            Player owner = avatar.GetOwnerOfType<Player>();
+            if (owner != Player)
+                return Logger.WarnReturn(false, $"OnAssignStolenPower(): Player [{Player}] is attempting to assign stolen power for avatar [{avatar}] that belongs to another player");
+
             PrototypeId stealingPowerRef = (PrototypeId)assignStolenPower.StealingPowerProtoId;
+            if (stealingPowerRef == PrototypeId.Invalid) return Logger.WarnReturn(false, "OnAssignStolenPower(): stealingPowerRef == PrototypeId.Invalid");
+
             PrototypeId stolenPowerRef = (PrototypeId)assignStolenPower.StolenPowerProtoId;
+            if (stolenPowerRef == PrototypeId.Invalid) return Logger.WarnReturn(false, "OnAssignStolenPower(): stolenPowerRef == PrototypeId.Invalid");
 
-            Avatar avatar = Player.CurrentAvatar;
-            avatar.Properties[PropertyEnum.AvatarMappedPower, stealingPowerRef] = stolenPowerRef;
+            if (avatar.IsStolenPowerAvailable(stolenPowerRef) == false) return Logger.WarnReturn(false, "OnAssignStolenPower(): avatar.IsStolenPowerAvailable(stolenPowerRef) == false");
 
+            PrototypeId currentStolenPowerRef = avatar.GetMappedPowerFromOriginalPower(stealingPowerRef);
+            if (avatar.CanAssignStolenPower(stolenPowerRef, currentStolenPowerRef) == false)
+                return false;
+
+            if (currentStolenPowerRef != PrototypeId.Invalid)
+                avatar.UnassignMappedPower(currentStolenPowerRef);
+
+            avatar.MapPower(stealingPowerRef, stolenPowerRef);
             return true;
         }
 
@@ -1708,6 +1812,29 @@ namespace MHServerEmu.Games.Network
             if (uiSystemLockProto == null) return Logger.WarnReturn(false, $"OnUISystemLockState(): UISystemLockPrototype is null");
             uint state = uiSystemLockState.State;
             Player.Properties[PropertyEnum.UISystemLock, uiSystemRef] = state;
+            return true;
+        }
+
+        private bool OnEnableTalentPower(MailboxMessage message)    // 151
+        {
+            var enableTalentPower = message.As<NetMessageEnableTalentPower>();
+            if (enableTalentPower == null) return Logger.WarnReturn(false, $"OnEnableTalentPower(): Failed to retrieve message");
+
+            Avatar avatar = Game.EntityManager.GetEntity<Avatar>(enableTalentPower.AvatarId);
+            if (avatar == null) return Logger.WarnReturn(false, "OnEnableTalentPower(): avatar == null");
+
+            Player owner = avatar.GetOwnerOfType<Player>();
+            if (owner != Player)
+                return Logger.WarnReturn(false, $"OnEnableTalentPower(): Player [{Player}] is attempting to enable talent power for avatar [{avatar}] that belongs to another player");
+
+            PrototypeId talentPowerRef = (PrototypeId)enableTalentPower.PrototypeId;
+            int specIndex = (int)enableTalentPower.Spec;
+            bool enable = enableTalentPower.Enable;
+
+            if (avatar.CanToggleTalentPower(talentPowerRef, specIndex, false, enable) != CanToggleTalentResult.Success)
+                return false;
+
+            avatar.EnableTalentPower(talentPowerRef, specIndex, enable);
             return true;
         }
 

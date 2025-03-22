@@ -33,6 +33,8 @@ namespace MHServerEmu.Games.Powers
         [ThreadStatic]
         public static PowerPayload ReusableTickerPayload;
 
+        private readonly Dictionary<ulong, int> _hitCountDict = new();
+
         private ulong _propertySourceEntityId;
         private WorldEntityPrototype _powerOwnerProto;
         private WorldEntityPrototype _ultimatePowerOwnerProto;
@@ -279,6 +281,24 @@ namespace MHServerEmu.Games.Powers
         {
             TargetId = targetId;
             TargetPosition = targetPosition;
+        }
+
+        /// <summary>
+        /// Increments the number of times the specified target has been hit by this <see cref="PowerPayload"/>.
+        /// </summary>
+        public void IncrementHitCount(ulong targetId)
+        {
+            _hitCountDict.TryGetValue(targetId, out int count);
+            _hitCountDict[targetId] = ++count;
+        }
+
+        /// <summary>
+        /// Returns the number of times the specified target has been hit by this <see cref="PowerPayload"/>.
+        /// </summary>
+        public int GetHitCount(ulong targetId)
+        {
+            _hitCountDict.TryGetValue(targetId, out int count);
+            return count;
         }
 
         /// <summary>
@@ -617,12 +637,13 @@ namespace MHServerEmu.Games.Powers
 
             CalculateOverTimeHealing(target, overTimeProperties, timeSeconds);
             CalculateOverTimeResourceChange(target, overTimeProperties, timeSeconds);
+            CalculateOverTimeDamageAccumulationChange(overTimeProperties, timeSeconds);
         }
 
         /// <summary>
         /// Calculates damage for a tick of an over time effect.
         /// </summary>
-        public bool CalculateOverTimeDamage(WorldEntity target, PropertyCollection overTimeProperties, float timeSeconds)
+        private bool CalculateOverTimeDamage(WorldEntity target, PropertyCollection overTimeProperties, float timeSeconds)
         {
             // DoTs require a full power payload for calculations
             PowerPrototype powerProto = PowerPrototype;
@@ -655,10 +676,10 @@ namespace MHServerEmu.Games.Powers
 
                 // ----
                 // Calculate flat unmodified damage (not affected by scaling)
-                float damageUnmodified = overTimeProperties[PropertyEnum.DamageOverTimeBaseUnmodified];
+                float damageUnmodified = overTimeProperties[PropertyEnum.DamageOverTimeBaseUnmodified, damageType];
 
                 // Apply per-rank unmodified damage
-                float damageOverTimeBaseUnmodPerRank = overTimeProperties[PropertyEnum.DamageOverTimeBaseUnmodPerRank];
+                float damageOverTimeBaseUnmodPerRank = overTimeProperties[PropertyEnum.DamageOverTimeBaseUnmodPerRank, damageType];
                 int powerRank = Properties[PropertyEnum.PowerRank];
                 damageUnmodified += damageOverTimeBaseUnmodPerRank * powerRank;
 
@@ -676,7 +697,7 @@ namespace MHServerEmu.Games.Powers
         /// <summary>
         /// Calculates healing for a tick of an over time effect.
         /// </summary>
-        public void CalculateOverTimeHealing(WorldEntity target, PropertyCollection overTimeProperties, float timeSeconds)
+        private void CalculateOverTimeHealing(WorldEntity target, PropertyCollection overTimeProperties, float timeSeconds)
         {
             // Check if our target can receive healing
 
@@ -712,7 +733,7 @@ namespace MHServerEmu.Games.Powers
         /// <summary>
         /// Calculates primary and secondary resource change for a tick of an over time effect.
         /// </summary>
-        public void CalculateOverTimeResourceChange(WorldEntity target, PropertyCollection overTimeProperties, float timeSeconds)
+        private void CalculateOverTimeResourceChange(WorldEntity target, PropertyCollection overTimeProperties, float timeSeconds)
         {
             if (target is not Avatar avatar)
                 return;
@@ -773,6 +794,17 @@ namespace MHServerEmu.Games.Powers
                 Properties[PropertyEnum.SecondaryResourceChange] = secondaryResourceChange;
         }
 
+        private void CalculateOverTimeDamageAccumulationChange(PropertyCollection overTimeProperties, float timeSeconds)
+        {
+            foreach (var kvp in overTimeProperties.IteratePropertyRange(PropertyEnum.DamageAccumulationCOT))
+            {
+                Property.FromParam(kvp.Key, 0, out int damageTypeValue);
+                DamageType damageType = (DamageType)damageTypeValue;
+
+                Properties[PropertyEnum.DamageAccumulationChange, damageType] = kvp.Value * timeSeconds;
+            }
+        }
+
         #endregion
 
         #region Result Calculations
@@ -808,6 +840,7 @@ namespace MHServerEmu.Games.Powers
 
                     CalculateResultHealing(targetResults, target);
                     CalculateResultResourceChanges(targetResults, target);
+                    CalculateResultDamageAccumulation(targetResults);
                 }
 
                 // Dodging can still remove conditions
@@ -819,6 +852,10 @@ namespace MHServerEmu.Games.Powers
                 CalculateResultConditionsToAdd(targetResults, target, calculateForTarget);
                 CalculateResultNegativeStatusRemoval(targetResults, target);
             }
+
+            // Check Teleport property
+            if (calculateForTarget)
+                CalculateResultTeleport(targetResults, target);
 
             // Copy extra properties
             targetResults.Properties.CopyProperty(Properties, PropertyEnum.CreatorEntityAssetRefBase);
@@ -841,6 +878,7 @@ namespace MHServerEmu.Games.Powers
 
             CalculateResultHealing(targetResults, target);
             CalculateResultResourceChanges(targetResults, target);
+            CalculateResultDamageAccumulation(targetResults);
         }
 
         private bool CalculateResultDamage(PowerResults results, WorldEntity target)
@@ -1003,8 +1041,17 @@ namespace MHServerEmu.Games.Powers
             target.TryActivateOnGotDamagedProcs(ProcTriggerType.OnGotDamagedPriorResist, results, healthDelta);
 
             // Apply other modifiers
-            float difficultyMult = 1f;
-            CalculateResultDamageDifficultyScaling(results, target, ref difficultyMult);
+            CalculateResultDamageSplitBetweenTargets(results);
+
+            CalculateResultDamagePvPScaling(results, target);
+
+            CalculateResultDamageDifficultyScaling(results, target, out float difficultyMult);
+
+            CalculateResultDamageLiveTuningModifier(results);
+
+            CalculateResultDamageBounceModifier(results, target);
+
+            CalculateResultDamageBonusReservoir(results);
 
             CalculateResultDamageVulnerabilityModifier(results, target);
 
@@ -1012,11 +1059,17 @@ namespace MHServerEmu.Games.Powers
 
             CalculateResultDamageDefenseModifier(results, target);
 
+            CalculateResultDamagePctResistModifier(results, target);
+
+            CalculateResultDamageShieldModifier(results, target);   // DamageShield needs to be applied before DamageConversion (e.g. Psylocke's barrier)
+
             CalculateResultDamageConversion(results, target, difficultyMult);
 
             CalculateResultDamageMetaGameModifier(results, target);
 
             CalculateResultDamageLevelScaling(results, target, difficultyMult);
+
+            CalculateResultDamageTransfer(results, target);
 
             // Flag as NoDamage if we don't have damage and this isn't a DoT (this will make the client display 0)
             if (results.TestFlag(PowerResultFlags.OverTime) == false)
@@ -1320,8 +1373,52 @@ namespace MHServerEmu.Games.Powers
             value += maxDistanceBonus * distanceBonusMult;
         }
 
-        private bool CalculateResultDamageDifficultyScaling(PowerResults results, WorldEntity target, ref float difficultyMult)
+        private bool CalculateResultDamageSplitBetweenTargets(PowerResults results)
         {
+            // Used for SurturRaid (including Rogue's stolen power for Lord Brimstone) and MoleMan
+            if (Properties[PropertyEnum.DamageSplitBetweenTargets] == false)
+                return true;
+
+            int targetsHit = Math.Max(1, Properties[PropertyEnum.TargetsHit]);
+            if (targetsHit == 1)
+                return true;
+
+            float splitMult = 1f / targetsHit;
+
+            ApplyDamageMultiplier(results.Properties, splitMult);
+            return true;
+        }
+
+        private bool CalculateResultDamagePvPScaling(PowerResults results, WorldEntity target)
+        {
+            float pvpDamageMult = 1f;
+
+            // Damage modifiers that apply when the target is in a PvP match
+            if (target.IsInPvPMatch)
+            {
+                pvpDamageMult *= target.Properties[PropertyEnum.PvPIncomingDamageMult];
+                pvpDamageMult *= Properties[PropertyEnum.PvPOutgoingDamageMult];
+            }
+
+            // Damage modifiers that apply when both the owner and the target are players
+            if (IsPlayerPayload && target.CanBePlayerOwned())
+            {
+                DifficultyGlobalsPrototype difficultyGlobals = GameDatabase.DifficultyGlobalsPrototype;
+                pvpDamageMult *= difficultyGlobals.PvPDamageMultiplier;
+
+                Curve pvpDamageScalarFromLevelCurve = difficultyGlobals.PvPDamageScalarFromLevelCurve.AsCurve();
+                if (pvpDamageScalarFromLevelCurve != null)
+                    pvpDamageMult *= pvpDamageScalarFromLevelCurve.GetAt(CombatLevel);
+            }
+
+            ApplyDamageMultiplier(results.Properties, pvpDamageMult);
+            return true;
+        }
+
+        private bool CalculateResultDamageDifficultyScaling(PowerResults results, WorldEntity target, out float difficultyMult)
+        {
+            difficultyMult = 1f;
+
             // Do not apply difficulty scaling to player vs player or mob vs mob damage
             if (target.CanBePlayerOwned() == IsPlayerPayload)
                 return true;
@@ -1353,6 +1450,29 @@ namespace MHServerEmu.Games.Powers
             float tuningDamageMult = LiveTuningManager.GetLivePowerTuningVar(powerProto, tuningVar);
 
             ApplyDamageMultiplier(results.Properties, tuningDamageMult);
+            return true;
+        }
+
+        private bool CalculateResultDamageBounceModifier(PowerResults results, WorldEntity target)
+        {
+            PowerPrototype powerProto = PowerPrototype;
+            if (powerProto == null) return Logger.WarnReturn(false, "CalculateResultDamageBounceModifier(): powerProto == null");
+
+            Curve curve = powerProto.BounceDamagePctToSameIdCurve.AsCurve();
+            if (curve == null)
+                return true;
+
+            int hitCount = GetHitCount(target.Id);
+            float bounceMult = 1f + Math.Max(-1f, curve.GetAt(hitCount));
+
+            ApplyDamageMultiplier(results.Properties, bounceMult);
+            return true;
+        }
+
+        private bool CalculateResultDamageBonusReservoir(PowerResults results)
+        {
+            // PropertyEnum.DamageBonusReservoir - appears to be unused in 1.48/1.52
+            // Was used for Iron Man's Shield Overload in 1.10
             return true;
         }
 
@@ -1514,14 +1634,175 @@ namespace MHServerEmu.Games.Powers
 
             // Set mitigated damage
             for (int i = 0; i < damageValues.Length; i++)
+                results.Properties[PropertyEnum.Damage, i] = damageValues[i];
+
+            return true;
+        }
+
+        private bool CalculateResultDamagePctResistModifier(PowerResults results, WorldEntity target)
+        {
+            PowerPrototype powerProto = PowerPrototype;
+            if (powerProto == null) return Logger.WarnReturn(false, "CalculateResultDamagePctResistModifier(): powerProto == null");
+
+            Span<float> damageValues = stackalloc float[(int)DamageType.NumDamageTypes];
+            damageValues.Clear();
+
+            // Calculate damage mitigation by DamagePctResist
+            foreach (var kvp in results.Properties.IteratePropertyRange(PropertyEnum.Damage))
             {
-                float damage = damageValues[i];
+                float damage = kvp.Value;
                 if (damage == 0f)
                     continue;
 
-                results.Properties[PropertyEnum.Damage, i] = damage;
+                Property.FromParam(kvp.Key, 0, out int damageTypeValue);
+                DamageType damageType = (DamageType)damageTypeValue;
+
+                // DamagePctResist
+                float damagePctResist = target.Properties[PropertyEnum.DamagePctResist, damageType];
+                damagePctResist += target.Properties[PropertyEnum.DamagePctResist, DamageType.Any];
+
+                // DamagePctResistFromGear
+                damagePctResist += target.Properties[PropertyEnum.DamagePctResistFromGear, damageType];
+                damagePctResist += target.Properties[PropertyEnum.DamagePctResistFromGear, DamageType.Any];
+
+                // DamagePctResistVsPower / DamagePctResistVsPowerKeyword
+                float damagePctResistVsPower = target.Properties[PropertyEnum.DamagePctResistVsPower, powerProto.DataRef];
+                float damagePctResistVsPowerKeyword = 0f;
+
+                foreach (var powerKeywordKvp in target.Properties.IteratePropertyRange(PropertyEnum.DamagePctResistVsPowerKeyword))
+                {
+                    Property.FromParam(powerKeywordKvp.Key, 0, out PrototypeId keywordProtoRef);
+                    KeywordPrototype keywordProto = keywordProtoRef.As<KeywordPrototype>();
+                    if (keywordProto == null)
+                    {
+                        Logger.Warn("CalculateResultDamagePctResistModifier(): keywordProto == null");
+                        continue;
+                    }
+
+                    if (powerProto.HasKeyword(keywordProto))
+                        damagePctResistVsPowerKeyword = Math.Max(damagePctResistVsPowerKeyword, powerKeywordKvp.Value);
+                }
+
+                damagePctResist += Math.Max(damagePctResistVsPower, damagePctResistVsPowerKeyword);
+
+                // DamagePctResistFromAngle / DamagePctResistFromDistance
+                if (target.IsInWorld)
+                {
+                    float damagePctResistFromPosition = 0f;
+
+                    Vector3 ownerPosition = Power.IsMissileEffect(powerProto) ? UltimateOwnerPosition : PowerOwnerPosition;
+
+                    foreach (var angleKvp in target.Properties.IteratePropertyRange(PropertyEnum.DamagePctResistFromAngle))
+                    {
+                        Property.FromParam(angleKvp.Key, 0, out int angle);
+                        if (WorldEntity.CheckWithinAngle(target.RegionLocation.Position, target.Forward, ownerPosition, angle))
+                            damagePctResistFromPosition = Math.Max(damagePctResistFromPosition, angleKvp.Value);
+                    }
+
+                    foreach (var distanceKvp in target.Properties.IteratePropertyRange(PropertyEnum.DamagePctResistFromDistance))
+                    {
+                        Property.FromParam(distanceKvp.Key, 0, out int distanceThreshold);
+                        if (distanceThreshold <= 0)
+                            continue;
+
+                        float distanceSquared = Vector3.DistanceSquared(target.RegionLocation.Position, ownerPosition);
+                        if (distanceSquared > (distanceThreshold * distanceThreshold))
+                            damagePctResistFromPosition = Math.Max(damagePctResistFromPosition, distanceKvp.Value);
+                    }
+
+                    damagePctResist += damagePctResistFromPosition;
+                }
+                else
+                {
+                    Logger.Warn("CalculateResultDamagePctResistModifier(): target.IsInWorld == false");
+                }
+
+                // DamagePctResistVsRank
+                float damagePctResistVsRank = 0f;
+                PrototypeId powerOwnerRankProtoRef = Properties[PropertyEnum.Rank];
+                foreach (var rankKvp in target.Properties.IteratePropertyRange(PropertyEnum.DamagePctResistVsRank))
+                {
+                    Property.FromParam(rankKvp.Key, 0, out PrototypeId paramRankProtoRef);
+                    if (powerOwnerRankProtoRef == paramRankProtoRef)
+                        damagePctResistVsRank = Math.Max(damagePctResistVsRank, rankKvp.Value);
+                }
+
+                damagePctResist += Math.Clamp(damagePctResistVsRank, 0f, 1f);
+
+                // Apply damage pct resist
+                float damagePctResistMult = 1f - Math.Clamp(damagePctResist, 0f, 1f);
+
+                damageValues[(int)damageType] = damage * damagePctResistMult;
             }
 
+            // Set mitigated damage
+            for (int i = 0; i < damageValues.Length; i++)
+                results.Properties[PropertyEnum.Damage, i] = damageValues[i];
+
+            return true;
+        }
+
+        private bool CalculateResultDamageShieldModifier(PowerResults results, WorldEntity target)
+        {
+            ConditionCollection conditionCollection = target.ConditionCollection;
+            if (conditionCollection == null)
+                return true;
+
+            List<ulong> conditionCheckList = ListPool<ulong>.Instance.Get();
+
+            foreach (Condition condition in conditionCollection.IterateConditions(true))
+            {
+                bool expirationCheckNeeded = false;
+                PropertyCollection conditionProperties = condition.Properties;
+
+                for (DamageType damageType = 0; damageType < DamageType.NumDamageTypes; damageType++)
+                {
+                    float damageTotal = results.Properties[PropertyEnum.Damage, damageType];
+                    if (damageTotal <= 0f)
+                        continue;
+
+                    float damageShieldPercent = conditionProperties[PropertyEnum.DamageShieldPercent, damageType];
+                    damageShieldPercent += conditionProperties[PropertyEnum.DamageShieldPercent, DamageType.Any];
+                    if (damageShieldPercent == 0f)
+                        continue;
+
+                    float damageShielded = damageTotal * damageShieldPercent;
+
+                    expirationCheckNeeded |= ApplyDamageToShield(target, conditionProperties, damageType, damageTotal, ref damageShielded);
+
+                    if (conditionProperties[PropertyEnum.DamageShieldRegensFromDamage, damageType] == false)
+                        expirationCheckNeeded |= ApplyDamageToShield(target, conditionProperties, DamageType.Any, damageTotal, ref damageShielded);
+
+                    results.Properties[PropertyEnum.Damage, damageType] = damageTotal - damageShielded;
+                }
+
+                if (expirationCheckNeeded)
+                    conditionCheckList.Add(condition.Id);
+            }
+
+            while (conditionCheckList.Count > 0)
+            {
+                int index = conditionCheckList.Count - 1;
+                Condition condition = conditionCollection.GetCondition(conditionCheckList[index]);
+                conditionCheckList.RemoveAt(index);
+
+                if (condition == null)
+                    continue;
+
+                PropertyCollection conditionProperties = condition.Properties;
+
+                bool isExpired = false;
+
+                for (DamageType damageType = 0; damageType < DamageType.NumDamageTypes; damageType++)
+                    isExpired |= CheckDamageShieldExpiration(target, conditionProperties, damageType);
+
+                isExpired |= CheckDamageShieldExpiration(target, conditionProperties, DamageType.Any);
+
+                if (isExpired && conditionProperties[PropertyEnum.DamageShieldRemoveWhenExpired])
+                    results.AddConditionToRemove(condition.Id);
+            }
+
+            ListPool<ulong>.Instance.Return(conditionCheckList);
             return true;
         }
 
@@ -1601,6 +1882,12 @@ namespace MHServerEmu.Games.Powers
             return true;
         }
 
+        private bool CalculateResultDamageTransfer(PowerResults results, WorldEntity target)
+        {
+            // TODO, used for SurturRaid - MistressOfMagma
+            return true;
+        }
+
         private bool CalculateResultHealing(PowerResults results, WorldEntity target)
         {
             // Check if our target can receive healing
@@ -1677,6 +1964,23 @@ namespace MHServerEmu.Games.Powers
                 secondaryResourceChange += target.Properties[PropertyEnum.SecondaryResourceMax] * secondaryResourceChangePct;
 
             results.Properties[PropertyEnum.SecondaryResourceChange] = secondaryResourceChange;
+
+            return true;
+        }
+
+        private bool CalculateResultDamageAccumulation(PowerResults results)
+        {
+            // Start with the precalculated damage accumulation change (e.g. from an over time effect)
+            results.Properties.CopyPropertyRange(Properties, PropertyEnum.DamageAccumulationChange);
+
+            // Apply base change - is this used?
+            foreach (var kvp in Properties.IteratePropertyRange(PropertyEnum.DamageAccumulationChangeBase))
+            {
+                Property.FromParam(kvp.Key, 0, out int damageTypeValue);
+                DamageType damageType = (DamageType)damageTypeValue;
+
+                results.Properties.AdjustProperty((float)kvp.Value, new(PropertyEnum.DamageAccumulationChange, damageType));
+            }
 
             return true;
         }
@@ -2154,6 +2458,61 @@ namespace MHServerEmu.Games.Powers
             }
 
             return numRemoved > 0;
+        }
+
+        private void CalculateResultTeleport(PowerResults results, WorldEntity target)
+        {
+            if (target.Properties[PropertyEnum.NoForcedMovement]) return;
+            if (target.Locomotor == null) return;
+
+            foreach (var kvp in Properties.IteratePropertyRange(PropertyEnum.Teleport))
+            {
+                float distance = kvp.Value;
+                if (distance < 0) return;
+
+                Property.FromParam(kvp.Key, 0, out int ownerId);
+
+                var targetLocation = target.RegionLocation;
+                var region = targetLocation.Region;
+                if (region == null) return;
+
+                bool teleport;
+                var teleportRef = GameDatabase.PropertyInfoTable.LookupPropertyInfo(PropertyEnum.Teleport).PrototypeDataRef;
+
+                if (Properties[PropertyEnum.IgnoreNegativeStatusResist])
+                    teleport = true;
+                else if (target.Properties[PropertyEnum.CCResistAlwaysAll] || target.Properties[PropertyEnum.CCResistAlways, teleportRef])
+                    teleport = false;
+                else
+                {
+                    int ccResistScore = target.Properties[PropertyEnum.CCResistScore, teleportRef] + target.Properties[PropertyEnum.CCResistScoreAll];
+                    float resistPercent = target.GetNegStatusResistPercent(ccResistScore, Properties);
+                    teleport = resistPercent != 1.0f;
+                }
+
+                if (teleport)
+                {
+                    var targetPositon = targetLocation.Position;
+                    var ownerPosition = PowerOwnerPosition;
+
+                    var startPosition = ownerId != 0 ? ownerPosition : targetPositon;
+
+                    var dir = Vector3.Normalize2D(targetPositon - ownerPosition);
+                    targetPositon = startPosition + dir * distance;
+                    var teleportPositon = targetPositon;
+
+                    var result = region.NaviMesh.FindPointOnLineToOccupy(ref teleportPositon, startPosition, targetPositon,
+                        distance, target.Bounds, target.Locomotor.PathFlags, BlockingCheckFlags.CheckGroundMovementPowers, false);
+
+                    if (result != Navi.PointOnLineResult.Failed)
+                    {
+                        results.Flags |= PowerResultFlags.Teleport;
+                        results.TeleportPosition = teleportPositon;
+                    }
+                }
+
+                return;
+            }
         }
 
         private bool CalculateResultHitReaction(PowerResults results, WorldEntity target)
@@ -2803,6 +3162,63 @@ namespace MHServerEmu.Games.Powers
             ListPool<ulong>.Instance.Return(removeList);
             return numStacksToApply;
         }
+
+        #region Damage Shield
+
+        private static bool ApplyDamageToShield(WorldEntity target, PropertyCollection conditionProperties, DamageType damageType, float damageTotal, ref float damageShielded)
+        {
+            bool expirationCheckNeeded = false;
+
+            float damageAccumulationLimit = target.GetDamageAccumulationLimit(conditionProperties, damageType);
+            int numHitLimit = conditionProperties[PropertyEnum.DamageShieldNumHitLimit, damageType];
+
+            float damageAccumulationRemaining = 0f;
+            if (damageAccumulationLimit > 0f)
+                damageAccumulationRemaining = damageAccumulationLimit - conditionProperties[PropertyEnum.DamageAccumulation, damageType];
+
+            if (conditionProperties[PropertyEnum.DamageShieldRegensFromDamage, damageType])
+            {
+                // Regen shield from damage if needed
+                conditionProperties.AdjustProperty(-damageShielded, new(PropertyEnum.DamageAccumulation, damageType));
+
+                if (damageType != DamageType.Any)
+                    conditionProperties.AdjustProperty(-damageShielded, new(PropertyEnum.DamageAccumulation, DamageType.Any));
+            }
+            else if (damageAccumulationLimit > 0f && damageShielded > 0f && (numHitLimit > 0 || numHitLimit == -1))
+            {
+                // Accumulate damage if this is a finite shield (DamageAccumulationLimit > 0f or NumHitLimit > 0)
+                damageShielded = Math.Min(damageShielded, Math.Min(damageTotal, damageAccumulationRemaining));
+                conditionProperties.AdjustProperty(damageShielded, new(PropertyEnum.DamageAccumulation, damageType));
+
+                if (conditionProperties[PropertyEnum.DamageAccumulation, damageType] >= damageAccumulationLimit)
+                    expirationCheckNeeded = true;
+
+                if (numHitLimit > -1)
+                {
+                    conditionProperties.AdjustProperty(-1, new(PropertyEnum.DamageShieldNumHitLimit, damageType));
+                    expirationCheckNeeded = true;
+                }
+            }
+
+            return expirationCheckNeeded;
+        }
+
+        private static bool CheckDamageShieldExpiration(WorldEntity target, PropertyCollection conditionProperties, DamageType damageType)
+        {
+            bool isExpired = false;
+
+            float damageAccumulationLimit = target.GetDamageAccumulationLimit(conditionProperties, damageType);
+
+            if (damageAccumulationLimit > 0f && conditionProperties[PropertyEnum.DamageAccumulation, damageType] >= damageAccumulationLimit)
+                isExpired = true;
+
+            if (conditionProperties[PropertyEnum.DamageShieldNumHitLimit, damageType] == 0)
+                isExpired = true;
+
+            return isExpired;
+        }
+
+        #endregion
 
         /// <summary>
         /// Returns the HealthMax value of the provided <see cref="WorldEntity"/> adjusted for the specified combat level.

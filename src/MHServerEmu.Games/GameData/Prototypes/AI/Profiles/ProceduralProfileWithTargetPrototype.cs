@@ -632,7 +632,7 @@ namespace MHServerEmu.Games.GameData.Prototypes
                 agent.AIController.AttemptActivatePower(EffectPower, avatar.Id, avatar.RegionLocation.Position);
 
             // Run OnOrbPickup procs
-            KeywordPrototype orbEntityKeywordProto = GameDatabase.KeywordGlobalsPrototype.OrbEntityKeyword.As<KeywordPrototype>();
+            KeywordPrototype orbEntityKeywordProto = GameDatabase.KeywordGlobalsPrototype.OrbEntityKeywordPrototype;
             if (orbProto.HasKeyword(orbEntityKeywordProto))
                 avatar.TryActivateOnOrbPickupProcs(agent);
 
@@ -1049,7 +1049,6 @@ namespace MHServerEmu.Games.GameData.Prototypes
                 float distanceToMasterSq = Vector3.DistanceSquared2D(agent.RegionLocation.Position, master.RegionLocation.Position);
                 if (distanceToMasterSq > MaxDistToMasterBeforeTeleport * MaxDistToMasterBeforeTeleport)
                 {
-                    ProceduralAI.Logger.Debug($"Teleport agent {agent.RegionLocation.Position} to master {master.RegionLocation.Position}");
                     HandleContext(proceduralAI, ownerController, TeleportToMasterIfTooFarAway);
                 }
             }

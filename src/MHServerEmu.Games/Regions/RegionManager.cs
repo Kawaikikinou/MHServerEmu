@@ -174,7 +174,7 @@ namespace MHServerEmu.Games.Regions
             if (regionProto == null)
                 return Logger.WarnReturn<Region>(null, $"GetRegion(): {regionProtoRef} is not a valid region prototype ref");
 
-            PrototypeId difficultyTierProtoRef = playerConnection.Player.GetDifficultyTierForRegion(regionProtoRef);
+            PrototypeId difficultyTierProtoRef = playerConnection.Player.GetDifficultyTierForRegion(regionProtoRef, regionContext.DifficultyTierRef);
             if (difficultyTierProtoRef == PrototypeId.Invalid)
                 return Logger.WarnReturn<Region>(null, $"GetRegion(): Failed to get difficulty tier for region {regionProto}");
 
@@ -223,6 +223,9 @@ namespace MHServerEmu.Games.Regions
                     playerConnection.WorldView.AddRegion(regionProtoRef, region.Id);
                 }
             }
+
+            // Reset preferred difficulty
+            regionContext.DifficultyTierRef = PrototypeId.Invalid;
 
             return region;
         }
